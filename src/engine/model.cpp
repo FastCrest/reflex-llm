@@ -160,19 +160,31 @@ ModelConfig load_gguf_config(const std::string& path) {
     fclose(f);
 
     // vocab_size: most GGUF files don't have a top-level `vocab_size`
-    // metadata key (Qwen3, recent Llama variants, Phi, etc.). The
-    // authoritative source is the shape of `token_embd.weight`, which is
-    // always [vocab_size, hidden_dim]. Walk the tensor info section and
-    // read shape[0] of that tensor.
+    // metadata key (Qwen3, recent Llama variants, Phi, etc.). Derive it
+    // from `token_embd.weight`'s shape. GGUF stores tensors column-major,
+    // so a logical [vocab_size, hidden_dim] PyTorch matrix is laid out as
+    // shape = [hidden_dim, vocab_size] in the GGUF tensor info — meaning
+    // shape[0] = hidden_dim, shape[1] = vocab_size for Qwen3/Llama/Phi.
+    // Different emitters could swap the order though, so we pick whichever
+    // dim is NOT hidden_dim, falling back to max() if neither matches
+    // (defensive — vocab_size is almost always much larger than
+    // hidden_dim, so max() is the right tiebreaker).
     if (cfg.vocab_size == 0 && cfg.hidden_dim > 0) {
         std::vector<TensorInfo> tensors;
         if (parse_tensor_infos(path, tensors) >= 0) {
             for (const auto& ti : tensors) {
                 if (strcmp(ti.name, "token_embd.weight") == 0) {
-                    cfg.vocab_size = static_cast<int>(ti.shape[0]);
+                    int64_t s0 = ti.shape[0];
+                    int64_t s1 = (ti.n_dims >= 2) ? ti.shape[1] : 0;
+                    int64_t v;
+                    if (s0 == cfg.hidden_dim)      v = s1;
+                    else if (s1 == cfg.hidden_dim) v = s0;
+                    else                           v = std::max(s0, s1);
+                    cfg.vocab_size = static_cast<int>(v);
                     fprintf(stderr,
-                            "[gguf] vocab_size %d derived from token_embd.weight shape\n",
-                            cfg.vocab_size);
+                            "[gguf] vocab_size %d derived from token_embd.weight shape "
+                            "(%ld x %ld), hidden_dim %d\n",
+                            cfg.vocab_size, s0, s1, cfg.hidden_dim);
                     break;
                 }
             }
