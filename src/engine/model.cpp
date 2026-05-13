@@ -295,7 +295,8 @@ bool load_gguf_weights(const std::string& path, void** weights, int64_t* size) {
     if (err != cudaSuccess) {
         fprintf(stderr, "[gguf] cudaHostRegister failed: %s (continuing without pin)\n",
                 cudaGetErrorString(err));
-        // Not fatal — GPU can still read via page faults (slower but works)
+        // Not fatal: CPU reference paths can still read the mmap directly.
+        // GPU GEMV will decline to launch without a mapped device alias.
     } else {
         void* mapped_device = nullptr;
         err = cudaHostGetDevicePointer(&mapped_device, mapped, 0);
@@ -315,7 +316,7 @@ bool load_gguf_weights(const std::string& path, void** weights, int64_t* size) {
     madvise(mapped, *size, MADV_RANDOM);  // switch to random access for inference
 
     *weights = mapped;
-    fprintf(stderr, "[gguf] Loaded and pinned %ld MB\n", *size / (1024 * 1024));
+    fprintf(stderr, "[gguf] Loaded %ld MB\n", *size / (1024 * 1024));
     return true;
 }
 
