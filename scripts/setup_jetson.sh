@@ -57,7 +57,6 @@ echo ""
 echo "▸ Building jetson-llm..."
 cd "$(dirname "$0")/.."
 cmake -B build \
-    -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="87" \
     -DCMAKE_BUILD_TYPE=Release \
     2>&1 | tail -5

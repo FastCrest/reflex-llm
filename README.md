@@ -66,19 +66,27 @@ cmake --build build -j$(nproc)
 ```
 
 Outputs:
-- `build/jllm` — single-prompt CLI
-- `build/jllm-server` — HTTP server (drop-in replacement target for
+- `build/jetson-llm` — single-prompt / interactive CLI
+- `build/jetson-llm-server` — HTTP server (drop-in replacement target for
   `llama-server`)
 
 ## Run
 
 ```
-# CLI
-./build/jllm --model /path/to/model.gguf --prompt "Hello"
+# CLI (single prompt)
+./build/jetson-llm -m /path/to/model.gguf -p "Hello"
+
+# CLI (interactive chat loop)
+./build/jetson-llm -m /path/to/model.gguf -i
 
 # Server (HTTP, OpenAI-compatible)
-./build/jllm-server --model /path/to/model.gguf --port 8080
+./build/jetson-llm-server -m /path/to/model.gguf -p 8080
 ```
+
+Short flags only. CLI: `-m` model, `-p` prompt, `-n` max tokens,
+`-c` context, `-t` temperature, `-i` interactive, `-v` verbose,
+`-h` help. Server: `-m` model, `-p` **port** (not prompt — heads up),
+`-c` context, `--fp16-kv` to disable INT8 KV cache.
 
 ## Test
 
