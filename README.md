@@ -4,7 +4,7 @@ Jetson Orin-tuned LLM inference runtime — memory-first, power-aware,
 zero-allocation. Built to serve [`GenieClaw`](https://github.com/GeniePod/genie-claw)
 on a 7.6 GB iGPU without crowding out whisper.cpp + Piper + Home Assistant.
 
-**Target hardware:** Jetson Orin Nano Super 8 GB (SM 8.7, 102 GB/s, 77 TOPS)
+**Target hardware:** Jetson Orin Nano Super 8 GB (SM 8.7, 102 GB/s, 67 TOPS GPU)
 **Not supported:** x86, discrete GPUs, Windows, macOS — Jetson only.
 
 ## Status
