@@ -267,22 +267,16 @@ void gemv_q4(half* y, const void* W_q4, const half* scales, const half* x,
     gemv_quant(y, W_q4, 12, x, M, K, stream);
 }
 
-void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
-                int M, int K, cudaStream_t stream) {
+static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type,
+                           const std::vector<half>& h_x, int M, int K) {
     if (ggml_type != 12 && ggml_type != 13 && ggml_type != 14) {
         fprintf(stderr, "[GEMV] FATAL: unsupported GGML type %d (M=%d K=%d)\n",
                 ggml_type, M, K);
-        cudaMemsetAsync(y, 0, M * sizeof(half), stream);
-        return;
+        return false;
     }
 
-    cudaStreamSynchronize(stream);
-
-    std::vector<half> h_x(K);
-    std::vector<half> h_y(M);
-    cudaMemcpy(h_x.data(), x, K * sizeof(half), cudaMemcpyDeviceToHost);
-
     const int n_blocks = K / QK_K;
+    h_y.assign(M, 0.0f);
 
     for (int row = 0; row < M; row++) {
         float acc = 0.0f;
@@ -381,9 +375,27 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
             }
         }
 
-        h_y[row] = __float2half(acc);
+        h_y[row] = acc;
     }
 
+    return true;
+}
+
+void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
+                int M, int K, cudaStream_t stream) {
+    cudaStreamSynchronize(stream);
+
+    std::vector<half> h_x(K);
+    std::vector<float> h_y_f32;
+    std::vector<half> h_y(M);
+    cudaMemcpy(h_x.data(), x, K * sizeof(half), cudaMemcpyDeviceToHost);
+
+    if (!gemv_quant_cpu(h_y_f32, W, ggml_type, h_x, M, K)) {
+        cudaMemsetAsync(y, 0, M * sizeof(half), stream);
+        return;
+    }
+
+    for (int i = 0; i < M; i++) h_y[i] = __float2half(h_y_f32[i]);
     cudaMemcpy(y, h_y.data(), M * sizeof(half), cudaMemcpyHostToDevice);
 
     static int dbg_count = 0;
@@ -399,6 +411,22 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
         fprintf(stderr, "\n");
         dbg_count++;
     }
+}
+
+void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
+                    int M, int K, cudaStream_t stream) {
+    cudaStreamSynchronize(stream);
+
+    std::vector<half> h_x(K);
+    std::vector<float> h_y;
+    cudaMemcpy(h_x.data(), x, K * sizeof(half), cudaMemcpyDeviceToHost);
+
+    if (!gemv_quant_cpu(h_y, W, ggml_type, h_x, M, K)) {
+        cudaMemsetAsync(y, 0, M * sizeof(float), stream);
+        return;
+    }
+
+    cudaMemcpy(y, h_y.data(), M * sizeof(float), cudaMemcpyHostToDevice);
 }
 
 }  // namespace jllm

@@ -62,6 +62,18 @@ void gemv_quant(
     cudaStream_t   stream
 );
 
+// CPU reference K-quant GEMV that writes FP32 output. Used for logits while
+// the quantized CUDA path is being brought up.
+void gemv_quant_f32(
+    float*         y,
+    const void*    W,
+    int            ggml_type,
+    const half*    x,
+    int            M,
+    int            K,
+    cudaStream_t   stream
+);
+
 // ── Fused RMSNorm + Residual Add ────────────────────────────────────────
 // input = RMSNorm(x + residual) * weight
 // One read of x, one read of residual, one write of output.

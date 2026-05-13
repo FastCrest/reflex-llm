@@ -599,15 +599,16 @@ int Engine::decode_step(int pos) {
     cudaMemsetAsync(zero, 0, H * sizeof(half), stream_);
     fused_rmsnorm_residual(normed, x, zero, model_weights_.output_norm, 1, H, 1e-5f, true, stream_);
 
-    // Logits: FP16 GEMV then convert to FP32 on GPU (BUG #7 FIX)
-    half*  logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
+    // Logits: reference FP32 GEMV while quantized CUDA matvec is being validated.
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
 
-    gemv_quant(logits_fp16, model_weights_.output, model_weights_.output_type,
-               normed, config_.vocab_size, H, stream_);
+    if (!logits_fp32) {
+        fprintf(stderr, "[decode] FATAL: failed to allocate logits buffer\n");
+        return tokenizer_.eos_id;
+    }
 
-    // Convert on GPU — avoids per-element __half2float on CPU
-    fp16_to_fp32(logits_fp32, logits_fp16, config_.vocab_size, stream_);
+    gemv_quant_f32(logits_fp32, model_weights_.output, model_weights_.output_type,
+                   normed, config_.vocab_size, H, stream_);
 
     cudaStreamSynchronize(stream_);
 
@@ -658,12 +659,10 @@ void Engine::build_cuda_graph(int pos) {
     fused_rmsnorm_residual(g_normed, graph_x, g_zero,
                           model_weights_.output_norm, 1, H, 1e-5f, true, stream_);
 
-    // Capture logit projection + conversion
-    half* g_logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
+    // Capture logit projection.
     float* g_logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
-    gemv_quant(g_logits_fp16, model_weights_.output, model_weights_.output_type,
-               g_normed, config_.vocab_size, H, stream_);
-    fp16_to_fp32(g_logits_fp32, g_logits_fp16, config_.vocab_size, stream_);
+    gemv_quant_f32(g_logits_fp32, model_weights_.output, model_weights_.output_type,
+                   g_normed, config_.vocab_size, H, stream_);
 
     cudaError_t err = cudaStreamEndCapture(stream_, &decode_graph_);
     if (err != cudaSuccess) {

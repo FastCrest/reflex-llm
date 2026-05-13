@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cfloat>
+#include <cstdint>
 #include <numeric>
 #include <vector>
 #include <random>
@@ -16,6 +17,12 @@
 namespace jllm {
 
 static thread_local std::mt19937 g_rng(42);
+
+static bool finite_bits(float v) {
+    uint32_t bits;
+    memcpy(&bits, &v, sizeof(bits));
+    return (bits & 0x7F800000u) != 0x7F800000u;
+}
 
 static bool debug_kernels_enabled() {
     static const bool enabled = [] {
@@ -96,7 +103,7 @@ static int sample_greedy(const float* logits, int n) {
     int best = 0;
     float best_val = -INFINITY;
     for (int i = 0; i < n; i++) {
-        if (std::isfinite(logits[i]) && logits[i] > best_val) {
+        if (finite_bits(logits[i]) && logits[i] > best_val) {
             best = i;
             best_val = logits[i];
         }
@@ -112,7 +119,7 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
     float min_val = FLT_MAX;
     float max_val_raw = -FLT_MAX;
     for (int i = 0; i < vocab_size; i++) {
-        if (!std::isfinite(logits[i])) {
+        if (!finite_bits(logits[i])) {
             logits[i] = -INFINITY;
             invalid++;
         } else {
@@ -155,14 +162,14 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
 
     // Softmax (on CPU — small array)
     float max_val = *std::max_element(logits, logits + vocab_size);
-    if (!std::isfinite(max_val)) return 0;
+    if (!finite_bits(max_val)) return 0;
 
     float sum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         logits[i] = expf(logits[i] - max_val);
         sum += logits[i];
     }
-    if (!std::isfinite(sum) || sum <= 0.0f) return sample_greedy(logits, vocab_size);
+    if (!finite_bits(sum) || sum <= 0.0f) return sample_greedy(logits, vocab_size);
     float inv_sum = 1.0f / sum;
 
     // Build candidates
