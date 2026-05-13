@@ -265,6 +265,8 @@ void Engine::unload() {
     if (decode_graph_exec_) { cudaGraphExecDestroy(decode_graph_exec_); decode_graph_exec_ = nullptr; }
     if (decode_graph_)      { cudaGraphDestroy(decode_graph_); decode_graph_ = nullptr; }
     if (stream_)            { cudaStreamDestroy(stream_); stream_ = nullptr; }
+    for (void* p : device_weight_copies_) cudaFree(p);
+    device_weight_copies_.clear();
     kv_cache_.destroy();
     scratch_.destroy();
     if (weights_) {
@@ -275,6 +277,59 @@ void Engine::unload() {
     if (model_weights_.layers) { delete[] model_weights_.layers; model_weights_.layers = nullptr; }
     loaded_ = false;
     graph_captured_ = false;
+}
+
+static bool copy_weight_to_device(const void* src, size_t bytes, void** dst) {
+    if (!src || bytes == 0) return false;
+    void* p = nullptr;
+    cudaError_t err = cudaMalloc(&p, bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[model] cudaMalloc weight copy (%zu bytes) failed: %s\n",
+                bytes, cudaGetErrorString(err));
+        return false;
+    }
+    err = cudaMemcpy(p, src, bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[model] cudaMemcpy weight copy (%zu bytes) failed: %s\n",
+                bytes, cudaGetErrorString(err));
+        cudaFree(p);
+        return false;
+    }
+    *dst = p;
+    return true;
+}
+
+static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
+                                     std::vector<void*>& owned) {
+    const size_t norm_bytes = (size_t)hidden_dim * sizeof(float);
+
+    for (int l = 0; l < mw.n_layers; l++) {
+        auto& lw = mw.layers[l];
+        if (lw.rms_type != 0) {
+            fprintf(stderr, "[model] unsupported FP16 RMSNorm materialization in layer %d\n", l);
+            return false;
+        }
+
+        void* attn = nullptr;
+        void* ffn = nullptr;
+        if (!copy_weight_to_device(lw.rms_attn, norm_bytes, &attn)) return false;
+        if (!copy_weight_to_device(lw.rms_ffn, norm_bytes, &ffn)) {
+            cudaFree(attn);
+            return false;
+        }
+        owned.push_back(attn);
+        owned.push_back(ffn);
+        lw.rms_attn = attn;
+        lw.rms_ffn = ffn;
+    }
+
+    void* out_norm = nullptr;
+    if (!copy_weight_to_device(mw.output_norm, norm_bytes, &out_norm)) return false;
+    owned.push_back(out_norm);
+    mw.output_norm = out_norm;
+    fprintf(stderr, "[model] Materialized %d RMSNorm tensors on device\n",
+            mw.n_layers * 2 + 1);
+    return true;
 }
 
 bool Engine::load(const std::string& gguf_path, const GenParams& params) {
@@ -289,6 +344,11 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     if (!load_and_map_weights(gguf_path, &weights_, &weights_size_,
                               &model_weights_, config_)) {
         fprintf(stderr, "[engine] Failed to load/map weights\n");
+        return false;
+    }
+    if (!materialize_norm_weights(model_weights_, config_.hidden_dim,
+                                  device_weight_copies_)) {
+        fprintf(stderr, "[engine] Failed to materialize norm weights\n");
         return false;
     }
     budget_.model_mb = weights_size_ / (1024 * 1024);
@@ -402,10 +462,10 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
             float w_check[4];
             bool nfp32 = (lw.rms_type == 0);
             if (nfp32) {
-                memcpy(w_check, lw.rms_attn, 4 * sizeof(float));
+                cudaMemcpy(w_check, lw.rms_attn, 4 * sizeof(float), cudaMemcpyDeviceToHost);
             } else {
                 half h_w[4];
-                memcpy(h_w, lw.rms_attn, 4 * sizeof(half));
+                cudaMemcpy(h_w, lw.rms_attn, 4 * sizeof(half), cudaMemcpyDeviceToHost);
                 for (int i = 0; i < 4; i++) w_check[i] = __half2float(h_w[i]);
             }
             fprintf(stderr, "[layer %d] norm weight (fp32=%d): %.4f %.4f %.4f %.4f\n",

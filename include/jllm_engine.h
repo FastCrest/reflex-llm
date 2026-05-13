@@ -165,6 +165,7 @@ private:
     void*         weights_ = nullptr;
     int64_t       weights_size_ = 0;
     ModelWeights  model_weights_ = {};
+    std::vector<void*> device_weight_copies_;
     Tokenizer     tokenizer_;
 
     int           last_token_ = 0;
