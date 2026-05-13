@@ -41,9 +41,19 @@ struct GGUFMetaKV {
     };
 };
 
-// ── Forward declarations for code further down in this file ─────────────
+// ── GGUF tensor info (definition needed by load_gguf_config which reads
+//    `token_embd.weight` shape to derive vocab_size when metadata omits
+//    it). parse_tensor_infos is forward-declared and defined further
+//    down. ──────────────────────────────────────────────────────────────
 
-struct TensorInfo;
+struct TensorInfo {
+    char     name[256];
+    uint32_t n_dims;
+    int64_t  shape[4];
+    uint32_t type;        // GGMLType
+    uint64_t offset;      // offset from data start in file
+};
+
 static int64_t parse_tensor_infos(const std::string& path,
                                    std::vector<TensorInfo>& tensors);
 
@@ -307,16 +317,10 @@ static int64_t tensor_bytes(int type, int64_t n_elements) {
     return n_blocks * ggml_type_bytes_per_block(type);
 }
 
-struct TensorInfo {
-    char     name[256];
-    uint32_t n_dims;
-    int64_t  shape[4];
-    uint32_t type;        // GGMLType
-    uint64_t offset;      // offset from data start in file
-};
-
 // ── Parse GGUF tensor info section ───────────────────────────────────────
-// Returns data_offset (where tensor data starts in the file)
+// Returns data_offset (where tensor data starts in the file).
+// TensorInfo struct is defined near the top of this file so load_gguf_config
+// can use it too.
 
 static int64_t parse_tensor_infos(const std::string& path,
                                    std::vector<TensorInfo>& tensors) {
