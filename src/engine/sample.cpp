@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
+#include <cfloat>
 #include <numeric>
 #include <vector>
 #include <random>
@@ -14,6 +16,14 @@
 namespace jllm {
 
 static thread_local std::mt19937 g_rng(42);
+
+static bool debug_kernels_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_DEBUG_KERNELS");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
 
 struct TokenProb {
     int   id;
@@ -84,8 +94,13 @@ static int sample_from(const TokenProb* candidates, int n) {
 // Greedy: just pick the highest logit
 static int sample_greedy(const float* logits, int n) {
     int best = 0;
-    for (int i = 1; i < n; i++)
-        if (logits[i] > logits[best]) best = i;
+    float best_val = -INFINITY;
+    for (int i = 0; i < n; i++) {
+        if (std::isfinite(logits[i]) && logits[i] > best_val) {
+            best = i;
+            best_val = logits[i];
+        }
+    }
     return best;
 }
 
@@ -93,6 +108,43 @@ static int sample_greedy(const float* logits, int n) {
 
 int sample_token(float* logits, int vocab_size, const GenParams& params,
                  const int* recent_tokens, int n_recent) {
+    int invalid = 0;
+    float min_val = FLT_MAX;
+    float max_val_raw = -FLT_MAX;
+    for (int i = 0; i < vocab_size; i++) {
+        if (!std::isfinite(logits[i])) {
+            logits[i] = -INFINITY;
+            invalid++;
+        } else {
+            min_val = std::min(min_val, logits[i]);
+            max_val_raw = std::max(max_val_raw, logits[i]);
+        }
+    }
+
+    if (debug_kernels_enabled()) {
+        int best[5] = {0, 0, 0, 0, 0};
+        float vals[5] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
+        for (int i = 0; i < vocab_size; i++) {
+            const float v = logits[i];
+            for (int j = 0; j < 5; j++) {
+                if (v > vals[j]) {
+                    for (int k = 4; k > j; k--) {
+                        vals[k] = vals[k - 1];
+                        best[k] = best[k - 1];
+                    }
+                    vals[j] = v;
+                    best[j] = i;
+                    break;
+                }
+            }
+        }
+        fprintf(stderr,
+                "[sample] logits min=%.4f max=%.4f invalid=%d top: %d=%.4f %d=%.4f %d=%.4f %d=%.4f %d=%.4f\n",
+                min_val, max_val_raw, invalid,
+                best[0], vals[0], best[1], vals[1], best[2], vals[2],
+                best[3], vals[3], best[4], vals[4]);
+    }
+
     // Greedy at temperature 0
     if (params.temperature <= 0.0f)
         return sample_greedy(logits, vocab_size);
@@ -103,11 +155,14 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
 
     // Softmax (on CPU — small array)
     float max_val = *std::max_element(logits, logits + vocab_size);
+    if (!std::isfinite(max_val)) return 0;
+
     float sum = 0.0f;
     for (int i = 0; i < vocab_size; i++) {
         logits[i] = expf(logits[i] - max_val);
         sum += logits[i];
     }
+    if (!std::isfinite(sum) || sum <= 0.0f) return sample_greedy(logits, vocab_size);
     float inv_sum = 1.0f / sum;
 
     // Build candidates
