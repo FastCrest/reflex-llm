@@ -3,6 +3,8 @@
 
 #include "jllm_kernels.h"
 #include <cuda_fp16.h>
+#include <cmath>
+#include <vector>
 
 namespace jllm {
 
@@ -86,11 +88,44 @@ __global__ void fused_rmsnorm_residual_kernel(
 void fused_rmsnorm_residual(half* output, const half* x, const half* residual,
                             const void* weight, int rows, int hidden_dim,
                             float eps, bool weight_fp32, cudaStream_t stream) {
-    int block = BLOCK_SIZE;
-    // No dynamic shared memory needed: all shared state lives in the
-    // statically-allocated `block_partial[32]` array inside the kernel.
-    fused_rmsnorm_residual_kernel<<<rows, block, 0, stream>>>(
-        output, x, residual, weight, rows, hidden_dim, eps, weight_fp32);
+    const int total = rows * hidden_dim;
+    std::vector<half> h_x(total);
+    std::vector<half> h_res(total);
+    std::vector<half> h_out(total);
+    std::vector<float> h_w(hidden_dim);
+
+    cudaStreamSynchronize(stream);
+    cudaMemcpy(h_x.data(), x, total * sizeof(half), cudaMemcpyDeviceToHost);
+    if (residual) {
+        cudaMemcpy(h_res.data(), residual, total * sizeof(half), cudaMemcpyDeviceToHost);
+    }
+
+    if (weight_fp32) {
+        cudaMemcpy(h_w.data(), weight, hidden_dim * sizeof(float), cudaMemcpyDefault);
+    } else {
+        std::vector<half> h_wh(hidden_dim);
+        cudaMemcpy(h_wh.data(), weight, hidden_dim * sizeof(half), cudaMemcpyDefault);
+        for (int i = 0; i < hidden_dim; i++) h_w[i] = __half2float(h_wh[i]);
+    }
+
+    for (int row = 0; row < rows; row++) {
+        const int off = row * hidden_dim;
+        float sum_sq = 0.0f;
+        for (int i = 0; i < hidden_dim; i++) {
+            float val = __half2float(h_x[off + i]);
+            if (residual) val += __half2float(h_res[off + i]);
+            sum_sq += val * val;
+        }
+
+        const float rrms = 1.0f / sqrtf(sum_sq / hidden_dim + eps);
+        for (int i = 0; i < hidden_dim; i++) {
+            float val = __half2float(h_x[off + i]);
+            if (residual) val += __half2float(h_res[off + i]);
+            h_out[off + i] = __float2half(val * rrms * h_w[i]);
+        }
+    }
+
+    cudaMemcpy(output, h_out.data(), total * sizeof(half), cudaMemcpyHostToDevice);
 }
 
 }  // namespace jllm
