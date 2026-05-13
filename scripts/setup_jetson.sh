@@ -20,9 +20,18 @@ cat /etc/nv_tegra_release
 echo "  RAM: $(free -m | awk '/Mem:/ {print $2}') MB total, $(free -m | awk '/Mem:/ {print $7}') MB available"
 echo ""
 
-# 1. Set max performance
-echo "▸ Setting MAXN power mode (25W)..."
-sudo nvpmodel -m 0 2>/dev/null || echo "  (nvpmodel not available)"
+# 1. Set max performance.
+#    Orin Nano Super: mode 1 = MAXN SUPER (25 W), mode 0 = 15 W (legacy).
+#    Older Orin Nano (non-Super): mode 0 = MAXN (15 W max), no mode 1.
+#    Try mode 1 first; fall back to mode 0 if it's rejected.
+echo "▸ Setting max nvpmodel..."
+if sudo nvpmodel -m 1 2>/dev/null; then
+    echo "  Set mode 1 (MAXN SUPER, 25 W) — Orin Nano Super detected"
+elif sudo nvpmodel -m 0 2>/dev/null; then
+    echo "  Set mode 0 (MAXN, 15 W) — legacy Orin Nano"
+else
+    echo "  (nvpmodel not available — running with default power mode)"
+fi
 sudo jetson_clocks 2>/dev/null || echo "  (jetson_clocks not available)"
 
 # 2. Disable GUI if running (frees ~500 MB)

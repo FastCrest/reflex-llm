@@ -41,6 +41,12 @@ struct GGUFMetaKV {
     };
 };
 
+// ── Forward declarations for code further down in this file ─────────────
+
+struct TensorInfo;
+static int64_t parse_tensor_infos(const std::string& path,
+                                   std::vector<TensorInfo>& tensors);
+
 // ── Read model config from GGUF ──────────────────────────────────────────
 
 ModelConfig load_gguf_config(const std::string& path) {
@@ -141,21 +147,35 @@ ModelConfig load_gguf_config(const std::string& path) {
     if (cfg.max_seq_len == 0) cfg.max_seq_len = 2048;
     if (cfg.n_kv_heads == 0) cfg.n_kv_heads = cfg.n_heads;
 
-    // vocab_size: if not found in metadata, derive from token_embd tensor shape
-    // (many GGUF files don't have a vocab_size metadata key)
+    fclose(f);
+
+    // vocab_size: most GGUF files don't have a top-level `vocab_size`
+    // metadata key (Qwen3, recent Llama variants, Phi, etc.). The
+    // authoritative source is the shape of `token_embd.weight`, which is
+    // always [vocab_size, hidden_dim]. Walk the tensor info section and
+    // read shape[0] of that tensor.
     if (cfg.vocab_size == 0 && cfg.hidden_dim > 0) {
-        // Quick scan tensor infos for token_embd.weight shape[0]
-        fseek(f, 0, SEEK_SET);
-        // Re-read header
-        GGUFHeader hdr2;
-        fread(&hdr2, sizeof(hdr2), 1, f);
-        // Skip all KV pairs (reuse the skip logic from parse_tensor_infos)
-        // For simplicity, just set a common default
-        cfg.vocab_size = 32000;  // Llama default — will be overridden by tokenizer
-        fprintf(stderr, "[gguf] vocab_size not in metadata, defaulting to %d\n", cfg.vocab_size);
+        std::vector<TensorInfo> tensors;
+        if (parse_tensor_infos(path, tensors) >= 0) {
+            for (const auto& ti : tensors) {
+                if (strcmp(ti.name, "token_embd.weight") == 0) {
+                    cfg.vocab_size = static_cast<int>(ti.shape[0]);
+                    fprintf(stderr,
+                            "[gguf] vocab_size %d derived from token_embd.weight shape\n",
+                            cfg.vocab_size);
+                    break;
+                }
+            }
+        }
+        if (cfg.vocab_size == 0) {
+            cfg.vocab_size = 32000;  // last-resort Llama default
+            fprintf(stderr,
+                    "[gguf] vocab_size not in metadata and token_embd.weight not found; "
+                    "defaulting to %d\n",
+                    cfg.vocab_size);
+        }
     }
 
-    fclose(f);
     return cfg;
 }
 
@@ -509,9 +529,23 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     fprintf(stderr, "[model] Mapped %d / %zu tensors to weight structs\n",
             mapped, tensors.size());
 
+    // Tied-weight fallback: Qwen (all generations), Gemma, Llama 3.2 small,
+    // Phi-3-mini and many other modern models have `tie_word_embeddings: true`,
+    // meaning the output projection re-uses the token-embedding matrix
+    // instead of shipping a separate `output.weight` tensor. If the GGUF
+    // didn't include `output.weight`, alias it to `token_embd.weight` so
+    // the final logits matmul has something to read.
+    if (!mw->output && mw->tok_embd) {
+        mw->output = mw->tok_embd;
+        // Keep the type tag in sync — embd_type already reflects token_embd.
+        fprintf(stderr,
+                "[model] output.weight not found; tying to token_embd.weight "
+                "(common for Qwen/Gemma/Phi/Llama-3.2-small)\n");
+    }
+
     // Verify critical tensors are present
     if (!mw->tok_embd) fprintf(stderr, "[model] WARNING: token_embd.weight not found\n");
-    if (!mw->output)   fprintf(stderr, "[model] WARNING: output.weight not found\n");
+    if (!mw->output)   fprintf(stderr, "[model] WARNING: output.weight not found and no tied fallback available\n");
     for (int l = 0; l < cfg.n_layers; l++) {
         if (!mw->layers[l].wq)
             fprintf(stderr, "[model] WARNING: blk.%d.attn_q.weight not found\n", l);

@@ -200,9 +200,37 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
 
     int kv_bytes = params.kv_int8 ? 1 : 2;
     int auto_ctx = budget_.max_context(config_.n_layers, config_.n_kv_heads, config_.head_dim, kv_bytes);
-    int ctx = params.context_limit > 0 ? std::min(params.context_limit, auto_ctx) : auto_ctx;
-    ctx = std::min(ctx, config_.max_seq_len);
-    fprintf(stderr, "[engine] Context: %d tokens (memory-limited to %d)\n", ctx, auto_ctx);
+
+    // Cap the implicit auto-context to something the Tegra NvMap pinned-host
+    // allocator can actually hand us. `MemoryBudget::max_kv_mb()` is computed
+    // against total DRAM, but cudaMallocHost (pinned) on Tegra goes through
+    // NvMap which has a much lower quota — typically ~1.5 GB. Models like
+    // Qwen3-4B (36 layers × 8 KV heads × 80 head_dim) report ~40k auto
+    // tokens which then triggers a 1.8 GB pinned allocation that NvMap
+    // rejects with "NvMapMemAllocInternalTagged: error 12". 8192 tokens is
+    // plenty for chat workloads and stays well under that ceiling for every
+    // model we care about. Users who explicitly pass `-c <N>` bypass this
+    // cap and are responsible for fitting in pinned memory.
+    constexpr int DEFAULT_AUTO_CONTEXT_CAP = 8192;
+    if (params.context_limit > 0) {
+        // User explicitly asked for a context size — honor it, but still
+        // clamp to the model's max_seq_len.
+        int requested = std::min(params.context_limit, config_.max_seq_len);
+        int ctx = std::min(requested, auto_ctx);
+        fprintf(stderr,
+                "[engine] Context: %d tokens (user-requested, memory cap %d, model max %d)\n",
+                ctx, auto_ctx, config_.max_seq_len);
+        auto_ctx = ctx; // for subsequent use below
+    } else {
+        // Auto-pick a safe default.
+        int ctx = std::min({auto_ctx, config_.max_seq_len, DEFAULT_AUTO_CONTEXT_CAP});
+        fprintf(stderr,
+                "[engine] Context: %d tokens (auto-capped to %d; memory cap %d, model max %d). "
+                "Override with -c <N>.\n",
+                ctx, DEFAULT_AUTO_CONTEXT_CAP, auto_ctx, config_.max_seq_len);
+        auto_ctx = ctx;
+    }
+    int ctx = auto_ctx; // keep `ctx` for the rest of the function
 
     KVCachePool::Config kv_cfg = {};
     kv_cfg.n_layers = config_.n_layers;
