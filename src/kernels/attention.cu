@@ -10,6 +10,9 @@
 #include "jllm_kernels.h"
 #include <cuda_fp16.h>
 #include <cfloat>
+#include <cmath>
+#include <cstdio>
+#include <vector>
 
 namespace jllm {
 
@@ -157,13 +160,68 @@ void flash_attention_decode(
     int n_heads, int n_kv_heads, int head_dim, int seq_len,
     float scale, bool kv_int8, const float* kv_scales, cudaStream_t stream)
 {
-    // Shared memory: scores[TILE_KV] + output[head_dim]
-    int smem = (ATTN_TILE_KV + head_dim) * sizeof(float);
+    // Reference path while validating the model graph. The KV cache writer stores
+    // entries as [position][kv_head][head_dim], not [kv_head][position][head_dim].
+    // The CUDA kernel above used the latter layout, which reads wrong keys/values
+    // as soon as seq_len > 1 and poisons the residual stream.
+    (void)kv_scales;
+    cudaStreamSynchronize(stream);
 
-    flash_attention_decode_kernel<<<n_heads, ATTN_BLOCK, smem, stream>>>(
-        output, q, k_cache, v_cache,
-        n_heads, n_kv_heads, head_dim, seq_len,
-        scale, kv_int8, kv_scales);
+    if (kv_int8) {
+        fprintf(stderr, "[attention] FATAL: reference attention does not support INT8 KV yet\n");
+        cudaMemset(output, 0, (size_t)n_heads * head_dim * sizeof(half));
+        return;
+    }
+
+    const int kv_dim = n_kv_heads * head_dim;
+    const int q_dim = n_heads * head_dim;
+    const int gqa = n_heads / n_kv_heads;
+
+    std::vector<half> h_q(q_dim);
+    std::vector<half> h_k((size_t)seq_len * kv_dim);
+    std::vector<half> h_v((size_t)seq_len * kv_dim);
+    std::vector<half> h_out(q_dim);
+    std::vector<float> scores(seq_len);
+
+    cudaMemcpy(h_q.data(), q, (size_t)q_dim * sizeof(half), cudaMemcpyDefault);
+    cudaMemcpy(h_k.data(), k_cache, (size_t)seq_len * kv_dim * sizeof(half), cudaMemcpyDefault);
+    cudaMemcpy(h_v.data(), v_cache, (size_t)seq_len * kv_dim * sizeof(half), cudaMemcpyDefault);
+
+    for (int head = 0; head < n_heads; ++head) {
+        const int kv_head = head / gqa;
+        const int q_base = head * head_dim;
+
+        float max_score = -FLT_MAX;
+        for (int pos = 0; pos < seq_len; ++pos) {
+            const int kv_base = pos * kv_dim + kv_head * head_dim;
+            float dot = 0.0f;
+            for (int d = 0; d < head_dim; ++d) {
+                dot += __half2float(h_q[q_base + d]) * __half2float(h_k[kv_base + d]);
+            }
+            const float score = dot * scale;
+            scores[pos] = score;
+            if (score > max_score) max_score = score;
+        }
+
+        float sum = 0.0f;
+        for (int pos = 0; pos < seq_len; ++pos) {
+            const float p = expf(scores[pos] - max_score);
+            scores[pos] = p;
+            sum += p;
+        }
+        const float inv_sum = (sum > 0.0f) ? (1.0f / sum) : 0.0f;
+
+        for (int d = 0; d < head_dim; ++d) {
+            float acc = 0.0f;
+            for (int pos = 0; pos < seq_len; ++pos) {
+                const int kv_base = pos * kv_dim + kv_head * head_dim;
+                acc += scores[pos] * inv_sum * __half2float(h_v[kv_base + d]);
+            }
+            h_out[q_base + d] = __float2half(acc);
+        }
+    }
+
+    cudaMemcpy(output, h_out.data(), (size_t)q_dim * sizeof(half), cudaMemcpyDefault);
 }
 
 }  // namespace jllm

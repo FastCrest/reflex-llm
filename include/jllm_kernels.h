@@ -127,8 +127,8 @@ void rope_inplace(
 void flash_attention_decode(
     half*          output,     // [n_heads × head_dim]
     const half*    q,          // [n_heads × head_dim] (single query)
-    const void*    k_cache,    // [n_kv_heads × seq_len × head_dim] (FP16 or INT8)
-    const void*    v_cache,    // [n_kv_heads × seq_len × head_dim]
+    const void*    k_cache,    // [seq_len × n_kv_heads × head_dim] (FP16 or INT8)
+    const void*    v_cache,    // [seq_len × n_kv_heads × head_dim]
     int            n_heads,
     int            n_kv_heads, // GQA: n_heads / n_kv_heads = group size
     int            head_dim,
