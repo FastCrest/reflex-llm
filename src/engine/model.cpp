@@ -140,6 +140,15 @@ ModelConfig load_gguf_config(const std::string& path) {
                 char name[256] = {};
                 fread(name, 1, str_len, f);
                 cfg.name = name;
+            } else if (strstr(key, "general.architecture")) {
+                std::string arch(str_len, '\0');
+                fread(&arch[0], 1, str_len, f);
+                cfg.rope_neox =
+                    arch == "qwen" || arch == "qwen2" || arch == "qwen3" ||
+                    arch == "qwen2moe" || arch == "qwen3moe" ||
+                    arch == "gemma" || arch == "gemma2" || arch == "gemma3" ||
+                    arch == "phi2" || arch == "phi3" || arch == "gptneox" ||
+                    arch == "olmo" || arch == "olmo2";
             } else {
                 fseek(f, str_len, SEEK_CUR);
             }

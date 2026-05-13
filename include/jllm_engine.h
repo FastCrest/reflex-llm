@@ -27,6 +27,7 @@ struct ModelConfig {
     int         max_seq_len    = 0;
     float       rope_theta     = 0;
     float       rms_eps        = 1e-5f;
+    bool        rope_neox      = false;
     int         quant_type     = 0;
 
     int gqa_group_size() const { return n_kv_heads > 0 ? n_heads / n_kv_heads : 1; }

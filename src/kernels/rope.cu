@@ -3,9 +3,12 @@
 // Applies RoPE to Q and K tensors before attention.
 // Fused: processes both Q and K in one kernel launch.
 //
-// RoPE formula for dimension pair (2i, 2i+1):
-//   q'[2i]   = q[2i]   * cos(θ) - q[2i+1] * sin(θ)
-//   q'[2i+1] = q[2i]   * sin(θ) + q[2i+1] * cos(θ)
+// Normal RoPE uses adjacent pairs (2i, 2i+1). Qwen/Gemma/Phi use the
+// GPT-NeoX layout from llama.cpp: pair i with i + head_dim/2.
+//
+// RoPE formula for pair (a, b):
+//   q'[a] = q[a] * cos(θ) - q[b] * sin(θ)
+//   q'[b] = q[a] * sin(θ) + q[b] * cos(θ)
 //   where θ = position / (theta_base ^ (2i / head_dim))
 
 #include "jllm_kernels.h"
@@ -18,7 +21,7 @@ __global__ void rope_kernel(
     half* __restrict__ q,       // [n_heads × head_dim]
     half* __restrict__ k,       // [n_kv_heads × head_dim]
     int n_heads, int n_kv_heads, int head_dim,
-    int position, float theta_base)
+    int position, float theta_base, bool neox)
 {
     // One thread per dimension pair
     const int tid = blockIdx.x * blockDim.x + threadIdx.x;
@@ -50,9 +53,10 @@ __global__ void rope_kernel(
     float cos_val = cosf(angle);
     float sin_val = sinf(angle);
 
-    // Rotate the pair
-    int idx0 = pair_idx * 2;
-    int idx1 = pair_idx * 2 + 1;
+    // Rotate the pair. llama.cpp uses GGML_ROPE_TYPE_NEOX for Qwen3:
+    // pair_idx rotates with pair_idx + head_dim/2 instead of an adjacent dim.
+    int idx0 = neox ? pair_idx : pair_idx * 2;
+    int idx1 = neox ? pair_idx + half_dim : pair_idx * 2 + 1;
     float v0 = __half2float(ptr[idx0]);
     float v1 = __half2float(ptr[idx1]);
 
@@ -62,13 +66,13 @@ __global__ void rope_kernel(
 
 void rope_inplace(half* q, half* k, int n_heads, int n_kv_heads,
                   int head_dim, int position, float theta_base,
-                  cudaStream_t stream) {
+                  bool neox, cudaStream_t stream) {
     int total_pairs = (n_heads + n_kv_heads) * (head_dim / 2);
     int block = BLOCK_SIZE;  // 128
     int grid = (total_pairs + block - 1) / block;
 
     rope_kernel<<<grid, block, 0, stream>>>(
-        q, k, n_heads, n_kv_heads, head_dim, position, theta_base);
+        q, k, n_heads, n_kv_heads, head_dim, position, theta_base, neox);
 }
 
 }  // namespace jllm

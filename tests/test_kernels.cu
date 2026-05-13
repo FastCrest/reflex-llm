@@ -50,7 +50,7 @@ static void test_rope() {
     ones.resize(nkv * hd, __float2half(1.0f));
     cudaMemcpy(d_k, ones.data(), ones.size() * sizeof(half), cudaMemcpyHostToDevice);
 
-    jllm::rope_inplace(d_q, d_k, nh, nkv, hd, 0, 10000.0f, 0);
+    jllm::rope_inplace(d_q, d_k, nh, nkv, hd, 0, 10000.0f, false, 0);
     cudaDeviceSynchronize();
 
     std::vector<half> res(nh * hd);

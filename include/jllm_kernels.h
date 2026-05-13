@@ -116,6 +116,7 @@ void rope_inplace(
     int            head_dim,
     int            position,   // token position in sequence
     float          theta_base, // RoPE base (typically 10000 or 500000)
+    bool           neox,       // true: pair i with i + head_dim/2
     cudaStream_t   stream
 );
 
