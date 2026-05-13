@@ -26,6 +26,7 @@ struct ModelConfig {
     int         vocab_size     = 0;
     int         max_seq_len    = 0;
     float       rope_theta     = 0;
+    float       rms_eps        = 1e-5f;
     int         quant_type     = 0;
 
     int gqa_group_size() const { return n_kv_heads > 0 ? n_heads / n_kv_heads : 1; }
@@ -120,8 +121,12 @@ struct Tokenizer {
 
 private:
     std::unordered_map<std::string, int> token_to_id_;
+    std::unordered_map<std::string, int> bpe_ranks_;
     std::vector<int> sorted_by_len_;
     int max_token_len_ = 0;
+    bool byte_encode_ = true;
+    bool add_bos_ = true;
+    bool add_eos_ = false;
 };
 
 // ── Sampling ─────────────────────────────────────────────────────────────

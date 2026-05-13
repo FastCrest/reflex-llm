@@ -8,8 +8,147 @@
 #include <cstdio>
 #include <cstring>
 #include <algorithm>
+#include <cctype>
+#include <climits>
 
 namespace jllm {
+
+static std::string utf8_from_codepoint(uint32_t cp) {
+    std::string out;
+    if (cp <= 0x7F) {
+        out.push_back((char)cp);
+    } else if (cp <= 0x7FF) {
+        out.push_back((char)(0xC0 | (cp >> 6)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else if (cp <= 0xFFFF) {
+        out.push_back((char)(0xE0 | (cp >> 12)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back((char)(0xF0 | (cp >> 18)));
+        out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back((char)(0x80 | (cp & 0x3F)));
+    }
+    return out;
+}
+
+static int utf8_len(unsigned char c) {
+    if ((c & 0x80) == 0) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+
+static const std::vector<std::string>& byte_encoder() {
+    static const std::vector<std::string> enc = [] {
+        std::vector<int> bs;
+        for (int b = '!'; b <= '~'; ++b) bs.push_back(b);
+        for (int b = 0xA1; b <= 0xAC; ++b) bs.push_back(b);
+        for (int b = 0xAE; b <= 0xFF; ++b) bs.push_back(b);
+
+        std::vector<int> cs = bs;
+        int n = 0;
+        for (int b = 0; b < 256; ++b) {
+            if (std::find(bs.begin(), bs.end(), b) == bs.end()) {
+                bs.push_back(b);
+                cs.push_back(256 + n);
+                n++;
+            }
+        }
+
+        std::vector<std::string> out(256);
+        for (size_t i = 0; i < bs.size(); ++i)
+            out[bs[i]] = utf8_from_codepoint((uint32_t)cs[i]);
+        return out;
+    }();
+    return enc;
+}
+
+static const std::unordered_map<std::string, unsigned char>& byte_decoder() {
+    static const std::unordered_map<std::string, unsigned char> dec = [] {
+        std::unordered_map<std::string, unsigned char> out;
+        const auto& enc = byte_encoder();
+        for (int i = 0; i < 256; ++i)
+            out[enc[i]] = (unsigned char)i;
+        return out;
+    }();
+    return dec;
+}
+
+static std::string encode_bytes_gpt2(const std::string& text) {
+    const auto& enc = byte_encoder();
+    std::string out;
+    out.reserve(text.size() * 2);
+    for (unsigned char c : text)
+        out += enc[c];
+    return out;
+}
+
+static std::vector<std::string> split_utf8_symbols(const std::string& text) {
+    std::vector<std::string> out;
+    for (size_t i = 0; i < text.size();) {
+        int len = utf8_len((unsigned char)text[i]);
+        if (i + len > text.size()) len = 1;
+        out.push_back(text.substr(i, len));
+        i += len;
+    }
+    return out;
+}
+
+static std::vector<std::string> pretokenize_ascii(const std::string& text) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < text.size()) {
+        size_t start = i;
+
+        if (text[i] == '\'' && i + 1 < text.size()) {
+            static const char* contractions[] = {"s", "t", "re", "ve", "m", "ll", "d"};
+            for (const char* c : contractions) {
+                size_t n = strlen(c);
+                if (i + 1 + n <= text.size() && text.compare(i + 1, n, c) == 0) {
+                    out.push_back(text.substr(i, n + 1));
+                    i += n + 1;
+                    goto next_piece;
+                }
+            }
+        }
+
+        if (text[i] == ' ' && i + 1 < text.size() &&
+            !std::isspace((unsigned char)text[i + 1])) {
+            i++;
+        }
+
+        if (i < text.size() && std::isalpha((unsigned char)text[i])) {
+            while (i < text.size() && std::isalpha((unsigned char)text[i])) i++;
+        } else if (i < text.size() && std::isdigit((unsigned char)text[i])) {
+            while (i < text.size() && std::isdigit((unsigned char)text[i])) i++;
+        } else if (i < text.size() && !std::isspace((unsigned char)text[i])) {
+            while (i < text.size() &&
+                   !std::isspace((unsigned char)text[i]) &&
+                   !std::isalpha((unsigned char)text[i]) &&
+                   !std::isdigit((unsigned char)text[i])) i++;
+        } else {
+            while (i < text.size() && std::isspace((unsigned char)text[i])) i++;
+        }
+
+        out.push_back(text.substr(start, i - start));
+
+next_piece:
+        continue;
+    }
+    return out;
+}
+
+static std::string bpe_key(const std::string& a, const std::string& b) {
+    std::string key;
+    key.reserve(a.size() + b.size() + 1);
+    key += a;
+    key.push_back('\n');
+    key += b;
+    return key;
+}
 
 bool Tokenizer::load_from_gguf(const std::string& path) {
     FILE* f = fopen(path.c_str(), "rb");
@@ -53,6 +192,37 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
             }
             fprintf(stderr, "[tokenizer] Loaded %zu tokens from GGUF\n", vocab.size());
         }
+        // tokenizer.ggml.merges = array of "left right" BPE merge strings
+        else if (strcmp(key, "tokenizer.ggml.merges") == 0 && vtype == 9) {
+            uint32_t arr_type;
+            uint64_t arr_len;
+            fread(&arr_type, 4, 1, f);
+            fread(&arr_len, 8, 1, f);
+
+            bpe_ranks_.clear();
+            bpe_ranks_.reserve(arr_len);
+            for (uint64_t m = 0; m < arr_len; m++) {
+                uint64_t str_len;
+                fread(&str_len, 8, 1, f);
+                std::string merge(str_len, '\0');
+                fread(&merge[0], 1, str_len, f);
+
+                size_t sp = merge.find(' ');
+                if (sp != std::string::npos) {
+                    std::string left = merge.substr(0, sp);
+                    std::string right = merge.substr(sp + 1);
+                    bpe_ranks_[bpe_key(left, right)] = (int)m;
+                }
+            }
+            fprintf(stderr, "[tokenizer] Loaded %zu BPE merges from GGUF\n", bpe_ranks_.size());
+        }
+        else if (strcmp(key, "tokenizer.ggml.model") == 0 && vtype == 8) {
+            uint64_t str_len;
+            fread(&str_len, 8, 1, f);
+            std::string model(str_len, '\0');
+            fread(&model[0], 1, str_len, f);
+            byte_encode_ = (model == "gpt2" || model == "qwen2");
+        }
         // tokenizer.ggml.bos_token_id
         else if (strcmp(key, "tokenizer.ggml.bos_token_id") == 0 && vtype == 4) {
             fread(&bos_id, 4, 1, f);
@@ -60,6 +230,16 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
         // tokenizer.ggml.eos_token_id
         else if (strcmp(key, "tokenizer.ggml.eos_token_id") == 0 && vtype == 4) {
             fread(&eos_id, 4, 1, f);
+        }
+        else if (strcmp(key, "tokenizer.ggml.add_bos_token") == 0 && vtype == 7) {
+            uint8_t v = 0;
+            fread(&v, 1, 1, f);
+            add_bos_ = (v != 0);
+        }
+        else if (strcmp(key, "tokenizer.ggml.add_eos_token") == 0 && vtype == 7) {
+            uint8_t v = 0;
+            fread(&v, 1, 1, f);
+            add_eos_ = (v != 0);
         }
         else {
             // Skip value based on type
@@ -127,8 +307,8 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
     for (const auto& t : vocab)
         max_token_len_ = std::max(max_token_len_, (int)t.size());
 
-    fprintf(stderr, "[tokenizer] vocab=%zu, bos=%d, eos=%d, max_token_len=%d\n",
-            vocab.size(), bos_id, eos_id, max_token_len_);
+    fprintf(stderr, "[tokenizer] vocab=%zu, bos=%d(add=%d), eos=%d(add=%d), max_token_len=%d\n",
+            vocab.size(), bos_id, add_bos_, eos_id, add_eos_, max_token_len_);
     return !vocab.empty();
 }
 
@@ -136,38 +316,81 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
 // Uses hash map for exact match + early termination by length
 std::vector<int> Tokenizer::encode(const std::string& text) const {
     std::vector<int> tokens;
-    tokens.push_back(bos_id);
+    if (add_bos_)
+        tokens.push_back(bos_id);
 
-    size_t pos = 0;
-    while (pos < text.size()) {
-        int best_id = -1;
-        size_t best_len = 0;
+    auto pieces = pretokenize_ascii(text);
+    for (const auto& raw_piece : pieces) {
+        std::string piece = byte_encode_ ? encode_bytes_gpt2(raw_piece) : raw_piece;
 
-        // Try longest match first, decreasing length
-        int try_len = std::min(max_token_len_, (int)(text.size() - pos));
-        for (int len = try_len; len >= 1; len--) {
-            std::string candidate = text.substr(pos, len);
-            auto it = token_to_id_.find(candidate);
+        if (bpe_ranks_.empty()) {
+            size_t pos = 0;
+            while (pos < piece.size()) {
+                int best_id = -1;
+                size_t best_len = 0;
+
+                int try_len = std::min(max_token_len_, (int)(piece.size() - pos));
+                for (int len = try_len; len >= 1; len--) {
+                    std::string candidate = piece.substr(pos, len);
+                    auto it = token_to_id_.find(candidate);
+                    if (it != token_to_id_.end()) {
+                        best_id = it->second;
+                        best_len = len;
+                        break;
+                    }
+                }
+
+                if (best_id >= 0) {
+                    tokens.push_back(best_id);
+                    pos += best_len;
+                } else {
+                    int len = utf8_len((unsigned char)piece[pos]);
+                    if (pos + len > piece.size()) len = 1;
+                    pos += len;
+                }
+            }
+            continue;
+        }
+
+        std::vector<std::string> symbols = split_utf8_symbols(piece);
+
+        while (symbols.size() > 1) {
+            int best_rank = INT_MAX;
+            size_t best_idx = symbols.size();
+            for (size_t i = 0; i + 1 < symbols.size(); ++i) {
+                auto it = bpe_ranks_.find(bpe_key(symbols[i], symbols[i + 1]));
+                if (it != bpe_ranks_.end() && it->second < best_rank) {
+                    best_rank = it->second;
+                    best_idx = i;
+                }
+            }
+            if (best_idx == symbols.size()) break;
+
+            symbols[best_idx] += symbols[best_idx + 1];
+            symbols.erase(symbols.begin() + best_idx + 1);
+        }
+
+        for (const auto& sym : symbols) {
+            auto it = token_to_id_.find(sym);
             if (it != token_to_id_.end()) {
-                best_id = it->second;
-                best_len = len;
-                break;  // longest match found — stop
+                tokens.push_back(it->second);
+                continue;
+            }
+
+            for (size_t pos = 0; pos < sym.size();) {
+                int len = utf8_len((unsigned char)sym[pos]);
+                if (pos + len > sym.size()) len = 1;
+                std::string fallback = sym.substr(pos, len);
+                auto fb = token_to_id_.find(fallback);
+                if (fb != token_to_id_.end())
+                    tokens.push_back(fb->second);
+                pos += len;
             }
         }
-
-        if (best_id >= 0) {
-            tokens.push_back(best_id);
-            pos += best_len;
-        } else {
-            // Byte fallback
-            char byte_tok[8];
-            snprintf(byte_tok, sizeof(byte_tok), "<0x%02X>", (unsigned char)text[pos]);
-            auto it = token_to_id_.find(byte_tok);
-            if (it != token_to_id_.end())
-                tokens.push_back(it->second);
-            pos++;
-        }
     }
+
+    if (add_eos_)
+        tokens.push_back(eos_id);
 
     return tokens;
 }
@@ -180,6 +403,26 @@ std::string Tokenizer::decode(int token_id) const {
             unsigned int byte_val;
             if (sscanf(tok.c_str(), "<0x%02X>", &byte_val) == 1)
                 return std::string(1, (char)byte_val);
+        }
+        if (byte_encode_) {
+            const auto& dec = byte_decoder();
+            std::string out;
+            bool decoded_any = false;
+            for (size_t pos = 0; pos < tok.size();) {
+                int len = utf8_len((unsigned char)tok[pos]);
+                if (pos + len > tok.size()) len = 1;
+                std::string cp = tok.substr(pos, len);
+                auto it = dec.find(cp);
+                if (it == dec.end()) {
+                    if (!decoded_any) return tok;
+                    out += cp;
+                } else {
+                    out.push_back((char)it->second);
+                    decoded_any = true;
+                }
+                pos += len;
+            }
+            return out;
         }
         return tok;
     }

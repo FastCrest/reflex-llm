@@ -131,6 +131,8 @@ ModelConfig load_gguf_config(const std::string& path) {
             float val;
             fread(&val, sizeof(val), 1, f);
             if (strstr(key, "rope.freq_base")) cfg.rope_theta = val;
+            else if (strstr(key, "layer_norm_rms_epsilon") ||
+                     strstr(key, "rms_norm_eps")) cfg.rms_eps = val;
         } else if (vtype == 8) {  // GGUF_TYPE_STRING
             uint64_t str_len;
             fread(&str_len, sizeof(str_len), 1, f);

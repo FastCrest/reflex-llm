@@ -357,9 +357,10 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     budget_ = probe_system_memory();
 
     config_ = load_gguf_config(gguf_path);
-    fprintf(stderr, "[engine] %s: %d layers, %d heads (%d KV), dim=%d, vocab=%d\n",
+    fprintf(stderr, "[engine] %s: %d layers, %d heads (%d KV), dim=%d, vocab=%d, rms_eps=%g\n",
             config_.name.c_str(), config_.n_layers, config_.n_heads,
-            config_.n_kv_heads, config_.hidden_dim, config_.vocab_size);
+            config_.n_kv_heads, config_.hidden_dim, config_.vocab_size,
+            config_.rms_eps);
 
     if (!load_and_map_weights(gguf_path, &weights_, &weights_size_,
                               &model_weights_, config_)) {
@@ -499,7 +500,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     half* zero_buf = (half*)scratch_.get(H * sizeof(half));
     cudaMemsetAsync(zero_buf, 0, H * sizeof(half), stream_);
     bool norm_fp32 = (lw.rms_type == 0);  // 0=F32, 1=F16
-    fused_rmsnorm_residual(normed, x, zero_buf, lw.rms_attn, 1, H, 1e-5f, norm_fp32, stream_);
+    fused_rmsnorm_residual(normed, x, zero_buf, lw.rms_attn, 1, H, config_.rms_eps, norm_fp32, stream_);
 
     // Debug: check normed output
     if (debug_kernels_enabled() && layer_dbg <= 1 && layer == 0) {
@@ -523,10 +524,10 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
         cudaMemsetAsync(k_zero, 0, KV_DIM * sizeof(half), stream_);
         fused_rmsnorm_residual(q_buf, q_buf, q_zero, lw.q_norm,
                                config_.n_heads, config_.head_dim,
-                               1e-6f, lw.qk_norm_type == 0, stream_);
+                               config_.rms_eps, lw.qk_norm_type == 0, stream_);
         fused_rmsnorm_residual(k_buf, k_buf, k_zero, lw.k_norm,
                                config_.n_kv_heads, config_.head_dim,
-                               1e-6f, lw.qk_norm_type == 0, stream_);
+                               config_.rms_eps, lw.qk_norm_type == 0, stream_);
     }
 
     // 3. RoPE
@@ -560,7 +561,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     // ── FFN block ────────────────────────────────────────────
 
     // 8. Pre-FFN RMSNorm: normed2 = RMSNorm(x2) * weight
-    fused_rmsnorm_residual(normed2, x2, zero_buf, lw.rms_ffn, 1, H, 1e-5f, norm_fp32, stream_);
+    fused_rmsnorm_residual(normed2, x2, zero_buf, lw.rms_ffn, 1, H, config_.rms_eps, norm_fp32, stream_);
 
     // 9. Gate and up projections
     gemv_quant(gate_buf, lw.w_gate, lw.type_w_gate, normed2, I, H, stream_);
@@ -597,7 +598,7 @@ int Engine::decode_step(int pos) {
     half* normed = (half*)scratch_.get(H * sizeof(half));
     half* zero = (half*)scratch_.get(H * sizeof(half));
     cudaMemsetAsync(zero, 0, H * sizeof(half), stream_);
-    fused_rmsnorm_residual(normed, x, zero, model_weights_.output_norm, 1, H, 1e-5f, true, stream_);
+    fused_rmsnorm_residual(normed, x, zero, model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
     // Logits: reference FP32 GEMV while quantized CUDA matvec is being validated.
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
@@ -657,7 +658,7 @@ void Engine::build_cuda_graph(int pos) {
     half* g_zero = (half*)scratch_.get(H * sizeof(half));
     cudaMemsetAsync(g_zero, 0, H * sizeof(half), stream_);
     fused_rmsnorm_residual(g_normed, graph_x, g_zero,
-                          model_weights_.output_norm, 1, H, 1e-5f, true, stream_);
+                          model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
     // Capture logit projection.
     float* g_logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
@@ -720,6 +721,15 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     if (prompt_tokens.empty()) {
         prompt_tokens.push_back(tokenizer_.bos_id);
     }
+    if (debug_kernels_enabled()) {
+        fprintf(stderr, "[tokenizer] prompt tokens:");
+        for (int i = 0; i < (int)prompt_tokens.size() && i < 16; i++) {
+            std::string piece = tokenizer_.decode(prompt_tokens[i]);
+            fprintf(stderr, " %d='%s'", prompt_tokens[i], piece.c_str());
+        }
+        if (prompt_tokens.size() > 16) fprintf(stderr, " ...");
+        fprintf(stderr, "\n");
+    }
 
     // Prefill
     auto t0 = Clock::now();
@@ -745,7 +755,12 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     auto t2 = Clock::now();
     int64_t peak_mem = 0;
     float peak_temp = 0;
-    int pos = prompt_tokens.size();
+    // The prefill loop already computed and cached the final prompt token at
+    // position N-1. For the first sampled token, recompute that same position
+    // to produce logits, then advance to position N for the sampled token.
+    // Starting at N duplicates the last prompt token in the KV cache with a
+    // shifted RoPE position and corrupts the first generation step.
+    int pos = std::max(0, (int)prompt_tokens.size() - 1);
 
     for (int i = 0; i < params.max_tokens && !stop_flag_; i++) {
         if (!check_memory_and_thermal(pos)) {
