@@ -401,10 +401,10 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
             float w_check[4];
             bool nfp32 = (lw.rms_type == 0);
             if (nfp32) {
-                memcpy(w_check, lw.rms_attn, 4 * sizeof(float));
+                cudaMemcpy(w_check, lw.rms_attn, 4 * sizeof(float), cudaMemcpyDefault);
             } else {
                 half h_w[4];
-                memcpy(h_w, lw.rms_attn, 4 * sizeof(half));
+                cudaMemcpy(h_w, lw.rms_attn, 4 * sizeof(half), cudaMemcpyDefault);
                 for (int i = 0; i < 4; i++) w_check[i] = __half2float(h_w[i]);
             }
             fprintf(stderr, "[layer %d] norm weight (fp32=%d): %.4f %.4f %.4f %.4f\n",

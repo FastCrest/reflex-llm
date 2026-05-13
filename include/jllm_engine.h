@@ -45,7 +45,7 @@ struct GenParams {
     float repeat_penalty = 1.1f;
     int   context_limit = 0;
     bool  use_cuda_graph = true;
-    bool  kv_int8       = true;
+    bool  kv_int8       = false;
 };
 
 using TokenCallback = std::function<void(const char* text, bool is_eos)>;

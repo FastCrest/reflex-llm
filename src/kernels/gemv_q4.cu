@@ -46,9 +46,7 @@ struct __attribute__((packed)) block_q6_K {
 static_assert(sizeof(block_q6_K) == 210, "Q6_K block must be 210 bytes");
 
 __device__ __forceinline__ float raw_fp16_to_float(uint16_t h) {
-    half tmp;
-    memcpy(&tmp, &h, 2);
-    return __half2float(tmp);
+    return __half2float(__ushort_as_half(h));
 }
 
 __device__ __forceinline__ void get_scale_min_k4(

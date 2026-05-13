@@ -25,6 +25,7 @@ struct Args {
     float       top_p       = 0.9f;
     bool        interactive = false;
     bool        verbose     = false;
+    bool        kv_int8     = false;
 };
 
 Args parse_args(int argc, char** argv) {
@@ -37,6 +38,8 @@ Args parse_args(int argc, char** argv) {
         else if (strcmp(argv[i], "-t") == 0 && i+1 < argc) args.temperature = atof(argv[++i]);
         else if (strcmp(argv[i], "-i") == 0) args.interactive = true;
         else if (strcmp(argv[i], "-v") == 0) args.verbose = true;
+        else if (strcmp(argv[i], "--int8-kv") == 0) args.kv_int8 = true;
+        else if (strcmp(argv[i], "--fp16-kv") == 0) args.kv_int8 = false;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
                 "jetson-llm — Memory-first LLM runtime for Jetson Orin\n\n"
@@ -49,6 +52,8 @@ Args parse_args(int argc, char** argv) {
                 "  -t FLOAT   Temperature (default: 0.7)\n"
                 "  -i         Interactive mode (chat loop)\n"
                 "  -v         Verbose (show memory/thermal stats)\n"
+                "  --int8-kv  Use experimental INT8 KV cache\n"
+                "  --fp16-kv  Use FP16 KV cache (default)\n"
                 "  -h         This help\n\n"
                 "Jetson-specific:\n"
                 "  Auto-detects power mode, thermal state, and available memory.\n"
@@ -111,6 +116,7 @@ int main(int argc, char** argv) {
     params.top_k = args.top_k;
     params.top_p = args.top_p;
     params.context_limit = args.context;
+    params.kv_int8 = args.kv_int8;
 
     fprintf(stderr, "Loading model...\n");
     if (!engine.load(args.model_path, params)) {
