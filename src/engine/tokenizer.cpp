@@ -296,8 +296,9 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
     for (int i = 0; i < (int)vocab.size(); i++) {
         const auto& tok = vocab[i];
         if (tok.size() >= 5 &&
-            tok.rfind("<|", 0) == 0 &&
-            tok.compare(tok.size() - 2, 2, "|>") == 0) {
+            ((tok.rfind("<|", 0) == 0 &&
+              tok.compare(tok.size() - 2, 2, "|>") == 0) ||
+             tok == "<think>" || tok == "</think>")) {
             special_tokens_.push_back({tok, i});
         }
     }

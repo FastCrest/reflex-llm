@@ -30,6 +30,7 @@ struct Args {
     bool        kv_int8     = false;
     bool        chat        = false;
     bool        raw_prompt  = false;
+    bool        think       = false;
 };
 
 static std::string lower_copy(std::string s) {
@@ -54,9 +55,10 @@ static bool should_apply_chat_template(const Args& args, const jllm::ModelConfig
     return contains_ci(cfg.name, "instruct") || contains_ci(cfg.name, "chat");
 }
 
-static std::string qwen_chat_prompt(const std::string& user_prompt) {
+static std::string qwen_chat_prompt(const std::string& user_prompt, bool think) {
     return "<|im_start|>user\n" + user_prompt +
-           "<|im_end|>\n<|im_start|>assistant\n";
+           "<|im_end|>\n<|im_start|>assistant\n" +
+           (think ? "" : "<think>\n\n</think>\n\n");
 }
 
 static std::string format_prompt(const std::string& prompt,
@@ -65,8 +67,9 @@ static std::string format_prompt(const std::string& prompt,
     if (!should_apply_chat_template(args, cfg) || already_chat_formatted(prompt)) {
         return prompt;
     }
-    fprintf(stderr, "[prompt] Applying Qwen chat template (use --raw to disable)\n");
-    return qwen_chat_prompt(prompt);
+    fprintf(stderr, "[prompt] Applying Qwen chat template (%s, use --raw to disable)\n",
+            args.think ? "thinking enabled" : "thinking disabled");
+    return qwen_chat_prompt(prompt, args.think);
 }
 
 Args parse_args(int argc, char** argv) {
@@ -83,6 +86,8 @@ Args parse_args(int argc, char** argv) {
         else if (strcmp(argv[i], "--fp16-kv") == 0) args.kv_int8 = false;
         else if (strcmp(argv[i], "--chat") == 0) args.chat = true;
         else if (strcmp(argv[i], "--raw") == 0) args.raw_prompt = true;
+        else if (strcmp(argv[i], "--think") == 0) args.think = true;
+        else if (strcmp(argv[i], "--no-think") == 0) args.think = false;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
                 "jetson-llm — Memory-first LLM runtime for Jetson Orin\n\n"
@@ -97,6 +102,8 @@ Args parse_args(int argc, char** argv) {
                 "  -v         Verbose (show memory/thermal stats)\n"
                 "  --chat     Wrap prompt with Qwen chat template\n"
                 "  --raw      Do not auto-wrap Instruct/Chat models\n"
+                "  --think    Enable Qwen3 thinking output\n"
+                "  --no-think Disable Qwen3 thinking output (default)\n"
                 "  --int8-kv  Use experimental INT8 KV cache\n"
                 "  --fp16-kv  Use FP16 KV cache (default)\n"
                 "  -h         This help\n\n"
