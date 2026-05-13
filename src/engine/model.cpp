@@ -231,8 +231,7 @@ bool load_gguf_weights(const std::string& path, void** weights, int64_t* size) {
     // On Jetson unified memory, mmap'd file is already in DRAM.
     // For GPU access, we need it pinned or use cudaHostRegister.
     // cudaHostRegister pins existing pages without copying.
-    cudaError_t err = cudaHostRegister(
-        mapped, *size, cudaHostRegisterReadOnly | cudaHostRegisterMapped);
+    cudaError_t err = cudaHostRegister(mapped, *size, cudaHostRegisterReadOnly);
     if (err != cudaSuccess) {
         fprintf(stderr, "[gguf] cudaHostRegister failed: %s (continuing without pin)\n",
                 cudaGetErrorString(err));
@@ -490,17 +489,7 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     // Step 2: mmap the file
     if (!load_gguf_weights(path, blob, blob_size)) return false;
 
-    void* gpu_blob = *blob;
-    cudaError_t ptr_err = cudaHostGetDevicePointer(&gpu_blob, *blob, 0);
-    if (ptr_err != cudaSuccess) {
-        fprintf(stderr, "[gguf] cudaHostGetDevicePointer failed: %s (using host pointer)\n",
-                cudaGetErrorString(ptr_err));
-        gpu_blob = *blob;
-    }
-
-    const char* host_data = (const char*)*blob + data_offset;
-    const char* gpu_data  = (const char*)gpu_blob + data_offset;
-    const void* tok_embd_gpu = nullptr;
+    const char* data = (const char*)*blob + data_offset;
 
     // Step 3: Allocate layer structs
     mw->n_layers = cfg.n_layers;
@@ -510,8 +499,7 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     // Step 4: Map each tensor name to the appropriate pointer
     int mapped = 0;
     for (auto& ti : tensors) {
-        const void* host_ptr = host_data + ti.offset;
-        const void* gpu_ptr  = gpu_data + ti.offset;
+        const void* ptr = data + ti.offset;
         int layer = -1;
 
         // Parse "blk.{N}.xxx" pattern
@@ -519,52 +507,51 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
             auto& lw = mw->layers[layer];
 
             if (strstr(ti.name, "attn_q.weight")) {
-                lw.wq = gpu_ptr; lw.type_wq = ti.type;
+                lw.wq = ptr; lw.type_wq = ti.type;
             }
             else if (strstr(ti.name, "attn_k.weight")) {
-                lw.wk = gpu_ptr; lw.type_wk = ti.type;
+                lw.wk = ptr; lw.type_wk = ti.type;
             }
             else if (strstr(ti.name, "attn_v.weight")) {
-                lw.wv = gpu_ptr; lw.type_wv = ti.type;
+                lw.wv = ptr; lw.type_wv = ti.type;
             }
             else if (strstr(ti.name, "attn_output.weight")) {
-                lw.wo = gpu_ptr; lw.type_wo = ti.type;
+                lw.wo = ptr; lw.type_wo = ti.type;
             }
             else if (strstr(ti.name, "ffn_gate.weight")) {
-                lw.w_gate = gpu_ptr; lw.type_w_gate = ti.type;
+                lw.w_gate = ptr; lw.type_w_gate = ti.type;
             }
             else if (strstr(ti.name, "ffn_up.weight")) {
-                lw.w_up = gpu_ptr; lw.type_w_up = ti.type;
+                lw.w_up = ptr; lw.type_w_up = ti.type;
             }
             else if (strstr(ti.name, "ffn_down.weight")) {
-                lw.w_down = gpu_ptr; lw.type_w_down = ti.type;
+                lw.w_down = ptr; lw.type_w_down = ti.type;
             }
             else if (strstr(ti.name, "attn_norm.weight")) {
-                lw.rms_attn = gpu_ptr;
+                lw.rms_attn = ptr;
                 lw.rms_type = (ti.type == 0) ? 0 : 1;
                 if (layer == 0) fprintf(stderr, "[model] blk.0.attn_norm type=%d offset=%lu\n", ti.type, ti.offset);
             }
             else if (strstr(ti.name, "ffn_norm.weight")) {
-                lw.rms_ffn = gpu_ptr;
+                lw.rms_ffn = ptr;
                 lw.rms_type = (ti.type == 0) ? 0 : 1;
             }
             else continue;
             mapped++;
         }
         else if (strcmp(ti.name, "token_embd.weight") == 0) {
-            mw->tok_embd = host_ptr;
-            tok_embd_gpu = gpu_ptr;
+            mw->tok_embd = ptr;
             mw->embd_type = ti.type;  // store actual GGML type (0=F32, 1=F16, 12=Q4_K, etc.)
             fprintf(stderr, "[model] token_embd type=%d\n", ti.type);
             mapped++;
         }
         else if (strcmp(ti.name, "output_norm.weight") == 0) {
-            mw->output_norm = gpu_ptr;
+            mw->output_norm = ptr;
             fprintf(stderr, "[model] output_norm type=%d\n", ti.type);
             mapped++;
         }
         else if (strcmp(ti.name, "output.weight") == 0) {
-            mw->output = gpu_ptr;
+            mw->output = ptr;
             mw->output_type = ti.type;
             mapped++;
         }
@@ -580,7 +567,7 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     // didn't include `output.weight`, alias it to `token_embd.weight` so
     // the final logits matmul has something to read.
     if (!mw->output && mw->tok_embd) {
-        mw->output = tok_embd_gpu ? tok_embd_gpu : mw->tok_embd;
+        mw->output = mw->tok_embd;
         mw->output_type = mw->embd_type;
         fprintf(stderr,
                 "[model] output.weight not found; tying to token_embd.weight "
