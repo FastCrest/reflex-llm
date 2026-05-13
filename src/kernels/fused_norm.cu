@@ -6,6 +6,23 @@
 
 namespace jllm {
 
+// Single-pass RMSNorm: avoid the previous two-pass sdata cache entirely.
+//
+// On Qwen3-4B (hidden_dim 2560, block 128) the previous implementation
+// produced output with every-other element zeroed — the signature of a
+// shared-memory layout bug where `extern __shared__ float sdata[]`
+// (sized hidden_dim×4) and the statically-allocated
+// `__shared__ float warp_sums[4]` could end up at overlapping or
+// otherwise miscomputed offsets, plus a missing __syncthreads between
+// Pass 1 (write sdata) and Pass 2 (read sdata) which technically only
+// each thread reads what it wrote but the compiler is free to reorder
+// the writes around the inter-warp reduction.
+//
+// This rewrite eliminates the cache entirely. Each thread reads x once
+// for the sum-of-squares pass, then re-reads x for the scale-and-write
+// pass. Two reads of a 5 KB hidden-state vector cost ~100 ns of LPDDR5
+// bandwidth — invisible next to the 100s of µs the kernel actually runs
+// for — and the correctness win is unambiguous.
 __global__ void fused_rmsnorm_residual_kernel(
     half*       __restrict__ output,
     const half* __restrict__ x,
@@ -20,46 +37,49 @@ __global__ void fused_rmsnorm_residual_kernel(
     const int stride = blockDim.x;
     const int offset = row * dim;
 
-    extern __shared__ float sdata[];
-
-    // Pass 1: compute x + residual and accumulate sum of squares
+    // ── Pass 1: compute sum of squares (read x[+residual] once) ─────────
     float sum_sq = 0.0f;
     for (int i = tid; i < dim; i += stride) {
-        float val = __half2float(x[offset + i]) + __half2float(residual[offset + i]);
-        sdata[i] = val;
+        float val = __half2float(x[offset + i]);
+        if (residual)
+            val += __half2float(residual[offset + i]);
         sum_sq += val * val;
     }
 
-    // Warp reduction
+    // Warp-level reduction first (intra-warp, no shared memory).
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         sum_sq += __shfl_xor_sync(0xFFFFFFFF, sum_sq, off);
 
-    __shared__ float warp_sums[4];
-    int warp_id = tid / 32;
-    int warp_lane = tid & 31;
-    if (warp_lane == 0) warp_sums[warp_id] = sum_sq;
+    // Block-level reduction via shared memory. Sized for up to 32 warps
+    // (block size ≤ 1024). Statically allocated; doesn't touch the
+    // dynamic shared memory pool, so launch-time smem can be 0.
+    __shared__ float block_partial[32];
+    const int warp_id   = tid >> 5;     // tid / 32
+    const int warp_lane = tid & 31;
+    if (warp_lane == 0) block_partial[warp_id] = sum_sq;
     __syncthreads();
 
+    // Thread 0 reduces across warps and writes rrms back into slot 0.
     if (tid == 0) {
+        const int n_warps = (stride + 31) >> 5;
         float total = 0.0f;
-        for (int w = 0; w < (stride + 31) / 32; w++)
-            total += warp_sums[w];
-        warp_sums[0] = total;
+        for (int w = 0; w < n_warps; w++) total += block_partial[w];
+        block_partial[0] = rsqrtf(total / dim + eps);
     }
     __syncthreads();
 
-    float rrms = rsqrtf(warp_sums[0] / dim + eps);
+    const float rrms = block_partial[0];
 
-    // Pass 2: normalize and scale by weight
+    // ── Pass 2: read x again, normalize, scale by weight, write ─────────
     for (int i = tid; i < dim; i += stride) {
-        float normed = sdata[i] * rrms;
-        float w;
-        if (weight_fp32)
-            w = ((const float*)weight)[i];
-        else
-            w = __half2float(((const half*)weight)[i]);
-        output[offset + i] = __float2half(normed * w);
+        float val = __half2float(x[offset + i]);
+        if (residual)
+            val += __half2float(residual[offset + i]);
+        float w = weight_fp32
+            ? ((const float*)weight)[i]
+            : __half2float(((const half*)weight)[i]);
+        output[offset + i] = __float2half(val * rrms * w);
     }
 }
 
@@ -67,10 +87,9 @@ void fused_rmsnorm_residual(half* output, const half* x, const half* residual,
                             const void* weight, int rows, int hidden_dim,
                             float eps, bool weight_fp32, cudaStream_t stream) {
     int block = BLOCK_SIZE;
-    int smem = hidden_dim * sizeof(float);
-    if (smem > JLLM_SHARED_MEM_SM) smem = JLLM_SHARED_MEM_SM;
-
-    fused_rmsnorm_residual_kernel<<<rows, block, smem, stream>>>(
+    // No dynamic shared memory needed: all shared state lives in the
+    // statically-allocated `block_partial[32]` array inside the kernel.
+    fused_rmsnorm_residual_kernel<<<rows, block, 0, stream>>>(
         output, x, residual, weight, rows, hidden_dim, eps, weight_fp32);
 }
 
