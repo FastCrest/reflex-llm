@@ -10,6 +10,7 @@
 #include <vector>
 #include <functional>
 #include <unordered_map>
+#include <utility>
 
 namespace jllm {
 
@@ -123,6 +124,7 @@ struct Tokenizer {
 private:
     std::unordered_map<std::string, int> token_to_id_;
     std::unordered_map<std::string, int> bpe_ranks_;
+    std::vector<std::pair<std::string, int>> special_tokens_;
     std::vector<int> sorted_by_len_;
     int max_token_len_ = 0;
     bool byte_encode_ = true;

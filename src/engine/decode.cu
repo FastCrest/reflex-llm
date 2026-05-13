@@ -357,9 +357,10 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     budget_ = probe_system_memory();
 
     config_ = load_gguf_config(gguf_path);
-    fprintf(stderr, "[engine] %s: %d layers, %d heads (%d KV), dim=%d, vocab=%d, rms_eps=%g, rope=%s\n",
+    fprintf(stderr, "[engine] %s: %d layers, %d heads (%d KV), dim=%d, head_dim=%d, vocab=%d, rms_eps=%g, rope=%s\n",
             config_.name.c_str(), config_.n_layers, config_.n_heads,
-            config_.n_kv_heads, config_.hidden_dim, config_.vocab_size,
+            config_.n_kv_heads, config_.hidden_dim, config_.head_dim,
+            config_.vocab_size,
             config_.rms_eps, config_.rope_neox ? "neox" : "normal");
 
     if (!load_and_map_weights(gguf_path, &weights_, &weights_size_,

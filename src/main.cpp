@@ -5,6 +5,8 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <algorithm>
+#include <cctype>
 #include <signal.h>
 #include <unistd.h>
 
@@ -26,7 +28,46 @@ struct Args {
     bool        interactive = false;
     bool        verbose     = false;
     bool        kv_int8     = false;
+    bool        chat        = false;
+    bool        raw_prompt  = false;
 };
+
+static std::string lower_copy(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    return s;
+}
+
+static bool contains_ci(const std::string& haystack, const char* needle) {
+    return lower_copy(haystack).find(needle) != std::string::npos;
+}
+
+static bool already_chat_formatted(const std::string& prompt) {
+    return prompt.find("<|im_start|>") != std::string::npos ||
+           prompt.find("<|start_header_id|>") != std::string::npos ||
+           prompt.find("[INST]") != std::string::npos;
+}
+
+static bool should_apply_chat_template(const Args& args, const jllm::ModelConfig& cfg) {
+    if (args.raw_prompt) return false;
+    if (args.chat) return true;
+    return contains_ci(cfg.name, "instruct") || contains_ci(cfg.name, "chat");
+}
+
+static std::string qwen_chat_prompt(const std::string& user_prompt) {
+    return "<|im_start|>user\n" + user_prompt +
+           "<|im_end|>\n<|im_start|>assistant\n";
+}
+
+static std::string format_prompt(const std::string& prompt,
+                                 const Args& args,
+                                 const jllm::ModelConfig& cfg) {
+    if (!should_apply_chat_template(args, cfg) || already_chat_formatted(prompt)) {
+        return prompt;
+    }
+    fprintf(stderr, "[prompt] Applying Qwen chat template (use --raw to disable)\n");
+    return qwen_chat_prompt(prompt);
+}
 
 Args parse_args(int argc, char** argv) {
     Args args;
@@ -40,6 +81,8 @@ Args parse_args(int argc, char** argv) {
         else if (strcmp(argv[i], "-v") == 0) args.verbose = true;
         else if (strcmp(argv[i], "--int8-kv") == 0) args.kv_int8 = true;
         else if (strcmp(argv[i], "--fp16-kv") == 0) args.kv_int8 = false;
+        else if (strcmp(argv[i], "--chat") == 0) args.chat = true;
+        else if (strcmp(argv[i], "--raw") == 0) args.raw_prompt = true;
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
                 "jetson-llm — Memory-first LLM runtime for Jetson Orin\n\n"
@@ -52,6 +95,8 @@ Args parse_args(int argc, char** argv) {
                 "  -t FLOAT   Temperature (default: 0.7)\n"
                 "  -i         Interactive mode (chat loop)\n"
                 "  -v         Verbose (show memory/thermal stats)\n"
+                "  --chat     Wrap prompt with Qwen chat template\n"
+                "  --raw      Do not auto-wrap Instruct/Chat models\n"
                 "  --int8-kv  Use experimental INT8 KV cache\n"
                 "  --fp16-kv  Use FP16 KV cache (default)\n"
                 "  -h         This help\n\n"
@@ -143,7 +188,8 @@ int main(int argc, char** argv) {
             if (strcmp(line, "quit") == 0 || strcmp(line, "exit") == 0) break;
             if (strlen(line) == 0) continue;
 
-            auto stats = engine.generate(line, params, [](const char* text, bool eos) {
+            std::string prompt = format_prompt(line, args, cfg);
+            auto stats = engine.generate(prompt, params, [](const char* text, bool eos) {
                 fputs(text, stdout);
                 fflush(stdout);
             });
@@ -154,7 +200,8 @@ int main(int argc, char** argv) {
         }
     } else if (!args.prompt.empty()) {
         // Single prompt mode
-        auto stats = engine.generate(args.prompt, params, [](const char* text, bool eos) {
+        std::string prompt = format_prompt(args.prompt, args, cfg);
+        auto stats = engine.generate(prompt, params, [](const char* text, bool eos) {
             fputs(text, stdout);
             fflush(stdout);
         });

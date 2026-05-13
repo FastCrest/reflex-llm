@@ -292,6 +292,20 @@ bool Tokenizer::load_from_gguf(const std::string& path) {
         token_to_id_[vocab[i]] = i;
     }
 
+    special_tokens_.clear();
+    for (int i = 0; i < (int)vocab.size(); i++) {
+        const auto& tok = vocab[i];
+        if (tok.size() >= 5 &&
+            tok.rfind("<|", 0) == 0 &&
+            tok.compare(tok.size() - 2, 2, "|>") == 0) {
+            special_tokens_.push_back({tok, i});
+        }
+    }
+    std::sort(special_tokens_.begin(), special_tokens_.end(),
+              [](const auto& a, const auto& b) {
+                  return a.first.size() > b.first.size();
+              });
+
     // Build sorted-by-length index for greedy longest-match
     sorted_by_len_.clear();
     sorted_by_len_.reserve(vocab.size());
@@ -319,74 +333,109 @@ std::vector<int> Tokenizer::encode(const std::string& text) const {
     if (add_bos_)
         tokens.push_back(bos_id);
 
-    auto pieces = pretokenize_ascii(text);
-    for (const auto& raw_piece : pieces) {
-        std::string piece = byte_encode_ ? encode_bytes_gpt2(raw_piece) : raw_piece;
+    auto encode_plain = [this, &tokens](const std::string& plain) {
+        auto pieces = pretokenize_ascii(plain);
+        for (const auto& raw_piece : pieces) {
+            std::string piece = byte_encode_ ? encode_bytes_gpt2(raw_piece) : raw_piece;
 
-        if (bpe_ranks_.empty()) {
-            size_t pos = 0;
-            while (pos < piece.size()) {
-                int best_id = -1;
-                size_t best_len = 0;
+            if (bpe_ranks_.empty()) {
+                size_t pos = 0;
+                while (pos < piece.size()) {
+                    int best_id = -1;
+                    size_t best_len = 0;
 
-                int try_len = std::min(max_token_len_, (int)(piece.size() - pos));
-                for (int len = try_len; len >= 1; len--) {
-                    std::string candidate = piece.substr(pos, len);
-                    auto it = token_to_id_.find(candidate);
-                    if (it != token_to_id_.end()) {
-                        best_id = it->second;
-                        best_len = len;
-                        break;
+                    int try_len = std::min(max_token_len_, (int)(piece.size() - pos));
+                    for (int len = try_len; len >= 1; len--) {
+                        std::string candidate = piece.substr(pos, len);
+                        auto it = token_to_id_.find(candidate);
+                        if (it != token_to_id_.end()) {
+                            best_id = it->second;
+                            best_len = len;
+                            break;
+                        }
+                    }
+
+                    if (best_id >= 0) {
+                        tokens.push_back(best_id);
+                        pos += best_len;
+                    } else {
+                        int len = utf8_len((unsigned char)piece[pos]);
+                        if (pos + len > piece.size()) len = 1;
+                        pos += len;
                     }
                 }
-
-                if (best_id >= 0) {
-                    tokens.push_back(best_id);
-                    pos += best_len;
-                } else {
-                    int len = utf8_len((unsigned char)piece[pos]);
-                    if (pos + len > piece.size()) len = 1;
-                    pos += len;
-                }
-            }
-            continue;
-        }
-
-        std::vector<std::string> symbols = split_utf8_symbols(piece);
-
-        while (symbols.size() > 1) {
-            int best_rank = INT_MAX;
-            size_t best_idx = symbols.size();
-            for (size_t i = 0; i + 1 < symbols.size(); ++i) {
-                auto it = bpe_ranks_.find(bpe_key(symbols[i], symbols[i + 1]));
-                if (it != bpe_ranks_.end() && it->second < best_rank) {
-                    best_rank = it->second;
-                    best_idx = i;
-                }
-            }
-            if (best_idx == symbols.size()) break;
-
-            symbols[best_idx] += symbols[best_idx + 1];
-            symbols.erase(symbols.begin() + best_idx + 1);
-        }
-
-        for (const auto& sym : symbols) {
-            auto it = token_to_id_.find(sym);
-            if (it != token_to_id_.end()) {
-                tokens.push_back(it->second);
                 continue;
             }
 
-            for (size_t pos = 0; pos < sym.size();) {
-                int len = utf8_len((unsigned char)sym[pos]);
-                if (pos + len > sym.size()) len = 1;
-                std::string fallback = sym.substr(pos, len);
-                auto fb = token_to_id_.find(fallback);
-                if (fb != token_to_id_.end())
-                    tokens.push_back(fb->second);
-                pos += len;
+            std::vector<std::string> symbols = split_utf8_symbols(piece);
+
+            while (symbols.size() > 1) {
+                int best_rank = INT_MAX;
+                size_t best_idx = symbols.size();
+                for (size_t i = 0; i + 1 < symbols.size(); ++i) {
+                    auto it = bpe_ranks_.find(bpe_key(symbols[i], symbols[i + 1]));
+                    if (it != bpe_ranks_.end() && it->second < best_rank) {
+                        best_rank = it->second;
+                        best_idx = i;
+                    }
+                }
+                if (best_idx == symbols.size()) break;
+
+                symbols[best_idx] += symbols[best_idx + 1];
+                symbols.erase(symbols.begin() + best_idx + 1);
+            }
+
+            for (const auto& sym : symbols) {
+                auto it = token_to_id_.find(sym);
+                if (it != token_to_id_.end()) {
+                    tokens.push_back(it->second);
+                    continue;
+                }
+
+                for (size_t pos = 0; pos < sym.size();) {
+                    int len = utf8_len((unsigned char)sym[pos]);
+                    if (pos + len > sym.size()) len = 1;
+                    std::string fallback = sym.substr(pos, len);
+                    auto fb = token_to_id_.find(fallback);
+                    if (fb != token_to_id_.end())
+                        tokens.push_back(fb->second);
+                    pos += len;
+                }
             }
         }
+    };
+
+    size_t pos = 0;
+    while (pos < text.size()) {
+        int special_id = -1;
+        size_t special_len = 0;
+        for (const auto& sp : special_tokens_) {
+            if (text.compare(pos, sp.first.size(), sp.first) == 0) {
+                special_id = sp.second;
+                special_len = sp.first.size();
+                break;
+            }
+        }
+
+        if (special_id >= 0) {
+            tokens.push_back(special_id);
+            pos += special_len;
+            continue;
+        }
+
+        size_t next = text.size();
+        for (size_t scan = pos + 1; scan < text.size(); ++scan) {
+            for (const auto& sp : special_tokens_) {
+                if (text.compare(scan, sp.first.size(), sp.first) == 0) {
+                    next = scan;
+                    goto found_next_special;
+                }
+            }
+        }
+
+found_next_special:
+        encode_plain(text.substr(pos, next - pos));
+        pos = next;
     }
 
     if (add_eos_)

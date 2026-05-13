@@ -123,6 +123,8 @@ ModelConfig load_gguf_config(const std::string& path) {
             if (strstr(key, "block_count"))        cfg.n_layers = val;
             else if (strstr(key, "head_count_kv")) cfg.n_kv_heads = val;
             else if (strstr(key, "head_count"))    cfg.n_heads = val;
+            else if (strstr(key, "attention.key_length")) cfg.head_dim = val;
+            else if (strstr(key, "attention.value_length")) cfg.head_dim = val;
             else if (strstr(key, "embedding_length")) cfg.hidden_dim = val;
             else if (strstr(key, "feed_forward_length")) cfg.intermediate_dim = val;
             else if (strstr(key, "vocab_size"))    cfg.vocab_size = val;
@@ -160,7 +162,7 @@ ModelConfig load_gguf_config(const std::string& path) {
     }
 
     // Derive head_dim
-    if (cfg.n_heads > 0 && cfg.hidden_dim > 0)
+    if (cfg.head_dim == 0 && cfg.n_heads > 0 && cfg.hidden_dim > 0)
         cfg.head_dim = cfg.hidden_dim / cfg.n_heads;
 
     // Defaults for missing fields
