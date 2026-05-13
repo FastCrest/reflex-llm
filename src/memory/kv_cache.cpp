@@ -70,23 +70,26 @@ void KVCachePool::destroy() {
 void* KVCachePool::key_ptr(int layer, int pos) {
     int64_t eb = entry_bytes() / 2;  // key is half of entry (key + value)
     if (pos < cfg_.max_context) {
-        return (char*)gpu_pool_ + layer * layer_stride() + pos * eb;
+        int64_t layer_stride = (int64_t)cfg_.max_context * entry_bytes();
+        return (char*)gpu_pool_ + layer * layer_stride + pos * eb;
     } else {
         int overflow_pos = pos - cfg_.max_context;
-        return (char*)cpu_pool_ + layer * (int64_t)cfg_.overflow_context * eb + overflow_pos * eb;
+        int64_t layer_stride = (int64_t)cfg_.overflow_context * entry_bytes();
+        return (char*)cpu_pool_ + layer * layer_stride + overflow_pos * eb;
     }
 }
 
 void* KVCachePool::val_ptr(int layer, int pos) {
     int64_t eb = entry_bytes() / 2;
-    int64_t key_offset = cfg_.max_context * eb;  // values stored after all keys
     if (pos < cfg_.max_context) {
-        return (char*)gpu_pool_ + layer * layer_stride() + key_offset + pos * eb;
+        int64_t layer_stride = (int64_t)cfg_.max_context * entry_bytes();
+        int64_t key_offset = (int64_t)cfg_.max_context * eb;  // values stored after all keys
+        return (char*)gpu_pool_ + layer * layer_stride + key_offset + pos * eb;
     } else {
         int overflow_pos = pos - cfg_.max_context;
-        int64_t ov_key_offset = cfg_.overflow_context * eb;
-        return (char*)cpu_pool_ + layer * (int64_t)cfg_.overflow_context * eb * 2
-               + ov_key_offset + overflow_pos * eb;
+        int64_t layer_stride = (int64_t)cfg_.overflow_context * entry_bytes();
+        int64_t key_offset = (int64_t)cfg_.overflow_context * eb;
+        return (char*)cpu_pool_ + layer * layer_stride + key_offset + overflow_pos * eb;
     }
 }
 
@@ -103,7 +106,7 @@ void KVCachePool::evict(int n_tokens) {
 
     int64_t eb = entry_bytes();
     for (int l = 0; l < cfg_.n_layers; l++) {
-        char* src = (char*)gpu_pool_ + l * layer_stride();
+        char* src = (char*)gpu_pool_ + l * (int64_t)cfg_.max_context * eb;
         char* dst = (char*)cpu_pool_ + l * (int64_t)cfg_.overflow_context * eb;
 
         // Copy oldest n_tokens to overflow
