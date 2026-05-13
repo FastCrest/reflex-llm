@@ -75,6 +75,13 @@ struct LayerWeights {
     const void* w_down   = nullptr;
     const void* rms_attn = nullptr;  // FP32 or FP16 depending on GGUF
     const void* rms_ffn  = nullptr;  // FP32 or FP16 depending on GGUF
+    int type_wq     = 12;            // GGML tensor type for quantized matvec
+    int type_wk     = 12;
+    int type_wv     = 12;
+    int type_wo     = 12;
+    int type_w_gate = 12;
+    int type_w_up   = 12;
+    int type_w_down = 12;
     int rms_type = 0;                // 0=F32, 1=F16
     const half* sq       = nullptr;
     const half* sk       = nullptr;
@@ -90,6 +97,7 @@ struct ModelWeights {
     const void*     output_norm = nullptr;  // F32 or F16
     int             embd_type   = 0;        // 0=F32, 1=F16
     const void*     output      = nullptr;
+    int             output_type = 12;       // GGML tensor type for output projection
     const half*     s_output    = nullptr;
     LayerWeights*   layers      = nullptr;
     int             n_layers    = 0;

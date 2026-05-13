@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cstdlib>
 #include <unistd.h>
 #include <sys/mman.h>   // BUG #4 fix
 
@@ -23,6 +24,14 @@ namespace jllm {
 
 using Clock = std::chrono::high_resolution_clock;
 using Ms    = std::chrono::duration<float, std::milli>;
+
+static bool debug_kernels_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_DEBUG_KERNELS");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
 
 // ── Vector add kernel (for residual connections) ─────────────────────────
 // BUG #2 fix: need explicit residual add between stages
@@ -195,13 +204,13 @@ static void dequant_embedding(half* dst, const void* embd_data, int token_id,
         // Q4_K (GGML_TYPE_Q4_K)
         dequant_q4k_row(h_row, embd_data, token_id, hidden_dim);
         static bool first = true;
-        if (first) {
+        if (first && debug_kernels_enabled()) {
             fprintf(stderr, "[embd] Q4_K dequant token %d, first 8 values: ", token_id);
             for (int i = 0; i < 8 && i < hidden_dim; i++)
                 fprintf(stderr, "%.4f ", h_row[i]);
             fprintf(stderr, "\n");
-            first = false;
         }
+        first = false;
         for (int i = 0; i < hidden_dim; i++)
             h_fp16[i] = __float2half(h_row[i]);
     } else if (embd_type == 14) {
@@ -211,13 +220,13 @@ static void dequant_embedding(half* dst, const void* embd_data, int token_id,
         // higher precision than the rest of the model.
         dequant_q6k_row(h_row, embd_data, token_id, hidden_dim);
         static bool first = true;
-        if (first) {
+        if (first && debug_kernels_enabled()) {
             fprintf(stderr, "[embd] Q6_K dequant token %d, first 8 values: ", token_id);
             for (int i = 0; i < 8 && i < hidden_dim; i++)
                 fprintf(stderr, "%.4f ", h_row[i]);
             fprintf(stderr, "\n");
-            first = false;
         }
+        first = false;
         for (int i = 0; i < hidden_dim; i++)
             h_fp16[i] = __float2half(h_row[i]);
     } else if (embd_type == 0) {
@@ -379,7 +388,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
 
     // Debug: check x values before first norm
     static int layer_dbg = 0;
-    if (layer_dbg < 1) {
+    if (debug_kernels_enabled() && layer_dbg < 1) {
         cudaStreamSynchronize(stream_);
         half h_x[8];
         cudaMemcpy(h_x, x, 8 * sizeof(half), cudaMemcpyDeviceToHost);
@@ -411,7 +420,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     fused_rmsnorm_residual(normed, x, zero_buf, lw.rms_attn, 1, H, 1e-5f, norm_fp32, stream_);
 
     // Debug: check normed output
-    if (layer_dbg <= 1 && layer == 0) {
+    if (debug_kernels_enabled() && layer_dbg <= 1 && layer == 0) {
         cudaStreamSynchronize(stream_);
         half h_n[8];
         cudaMemcpy(h_n, normed, 8 * sizeof(half), cudaMemcpyDeviceToHost);
@@ -421,9 +430,9 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     }
 
     // 2. QKV projections
-    gemv_q4(q_buf, lw.wq, lw.sq, normed, config_.n_heads * config_.head_dim, H, 32, stream_);
-    gemv_q4(k_buf, lw.wk, lw.sk, normed, KV_DIM, H, 32, stream_);
-    gemv_q4(v_buf, lw.wv, lw.sv, normed, KV_DIM, H, 32, stream_);
+    gemv_quant(q_buf, lw.wq, lw.type_wq, normed, config_.n_heads * config_.head_dim, H, stream_);
+    gemv_quant(k_buf, lw.wk, lw.type_wk, normed, KV_DIM, H, stream_);
+    gemv_quant(v_buf, lw.wv, lw.type_wv, normed, KV_DIM, H, stream_);
 
     // 3. RoPE
     rope_inplace(q_buf, k_buf, config_.n_heads, config_.n_kv_heads,
@@ -448,7 +457,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
                           pos + 1, scale, gen_params_.kv_int8, nullptr, stream_);
 
     // 6. Output projection
-    gemv_q4(attn_proj, lw.wo, lw.so, attn_out, H, H, 32, stream_);
+    gemv_quant(attn_proj, lw.wo, lw.type_wo, attn_out, H, H, stream_);
 
     // 7. FIRST RESIDUAL: x2 = x + attn_proj  (BUG #2 FIX)
     vec_add(x2, x, attn_proj, H, stream_);
@@ -459,14 +468,14 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     fused_rmsnorm_residual(normed2, x2, zero_buf, lw.rms_ffn, 1, H, 1e-5f, norm_fp32, stream_);
 
     // 9. Gate and up projections
-    gemv_q4(gate_buf, lw.w_gate, lw.s_gate, normed2, I, H, 32, stream_);
-    gemv_q4(up_buf,   lw.w_up,   lw.s_up,   normed2, I, H, 32, stream_);
+    gemv_quant(gate_buf, lw.w_gate, lw.type_w_gate, normed2, I, H, stream_);
+    gemv_quant(up_buf,   lw.w_up,   lw.type_w_up,   normed2, I, H, stream_);
 
     // 10. SwiGLU
     fused_swiglu(swiglu_out, gate_buf, up_buf, 1, I, stream_);
 
     // 11. Down projection
-    gemv_q4(ffn_out, lw.w_down, lw.s_down, swiglu_out, H, I, 32, stream_);
+    gemv_quant(ffn_out, lw.w_down, lw.type_w_down, swiglu_out, H, I, stream_);
 
     // 12. SECOND RESIDUAL: x = x2 + ffn_out  (BUG #2 FIX)
     vec_add(x, x2, ffn_out, H, stream_);
@@ -499,8 +508,8 @@ int Engine::decode_step(int pos) {
     half*  logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
 
-    gemv_q4(logits_fp16, model_weights_.output, model_weights_.s_output,
-            normed, config_.vocab_size, H, 32, stream_);
+    gemv_quant(logits_fp16, model_weights_.output, model_weights_.output_type,
+               normed, config_.vocab_size, H, stream_);
 
     // Convert on GPU — avoids per-element __half2float on CPU
     fp16_to_fp32(logits_fp32, logits_fp16, config_.vocab_size, stream_);
@@ -557,8 +566,8 @@ void Engine::build_cuda_graph(int pos) {
     // Capture logit projection + conversion
     half* g_logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
     float* g_logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
-    gemv_q4(g_logits_fp16, model_weights_.output, model_weights_.s_output,
-            g_normed, config_.vocab_size, H, 32, stream_);
+    gemv_quant(g_logits_fp16, model_weights_.output, model_weights_.output_type,
+               g_normed, config_.vocab_size, H, stream_);
     fp16_to_fp32(g_logits_fp32, g_logits_fp16, config_.vocab_size, stream_);
 
     cudaError_t err = cudaStreamEndCapture(stream_, &decode_graph_);

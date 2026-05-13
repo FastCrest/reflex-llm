@@ -506,13 +506,27 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
         if (sscanf(ti.name, "blk.%d.", &layer) == 1 && layer >= 0 && layer < cfg.n_layers) {
             auto& lw = mw->layers[layer];
 
-            if (strstr(ti.name, "attn_q.weight"))       lw.wq = ptr;
-            else if (strstr(ti.name, "attn_k.weight"))   lw.wk = ptr;
-            else if (strstr(ti.name, "attn_v.weight"))   lw.wv = ptr;
-            else if (strstr(ti.name, "attn_output.weight")) lw.wo = ptr;
-            else if (strstr(ti.name, "ffn_gate.weight")) lw.w_gate = ptr;
-            else if (strstr(ti.name, "ffn_up.weight"))   lw.w_up = ptr;
-            else if (strstr(ti.name, "ffn_down.weight")) lw.w_down = ptr;
+            if (strstr(ti.name, "attn_q.weight")) {
+                lw.wq = ptr; lw.type_wq = ti.type;
+            }
+            else if (strstr(ti.name, "attn_k.weight")) {
+                lw.wk = ptr; lw.type_wk = ti.type;
+            }
+            else if (strstr(ti.name, "attn_v.weight")) {
+                lw.wv = ptr; lw.type_wv = ti.type;
+            }
+            else if (strstr(ti.name, "attn_output.weight")) {
+                lw.wo = ptr; lw.type_wo = ti.type;
+            }
+            else if (strstr(ti.name, "ffn_gate.weight")) {
+                lw.w_gate = ptr; lw.type_w_gate = ti.type;
+            }
+            else if (strstr(ti.name, "ffn_up.weight")) {
+                lw.w_up = ptr; lw.type_w_up = ti.type;
+            }
+            else if (strstr(ti.name, "ffn_down.weight")) {
+                lw.w_down = ptr; lw.type_w_down = ti.type;
+            }
             else if (strstr(ti.name, "attn_norm.weight")) {
                 lw.rms_attn = ptr;
                 lw.rms_type = (ti.type == 0) ? 0 : 1;
@@ -538,6 +552,7 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
         }
         else if (strcmp(ti.name, "output.weight") == 0) {
             mw->output = ptr;
+            mw->output_type = ti.type;
             mapped++;
         }
     }
@@ -553,10 +568,18 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     // the final logits matmul has something to read.
     if (!mw->output && mw->tok_embd) {
         mw->output = mw->tok_embd;
-        // Keep the type tag in sync — embd_type already reflects token_embd.
+        mw->output_type = mw->embd_type;
         fprintf(stderr,
                 "[model] output.weight not found; tying to token_embd.weight "
                 "(common for Qwen/Gemma/Phi/Llama-3.2-small)\n");
+    }
+
+    if (cfg.n_layers > 0) {
+        const auto& l0 = mw->layers[0];
+        fprintf(stderr,
+                "[model] blk.0 mat types: q=%d k=%d v=%d o=%d gate=%d up=%d down=%d; output=%d\n",
+                l0.type_wq, l0.type_wk, l0.type_wv, l0.type_wo,
+                l0.type_w_gate, l0.type_w_up, l0.type_w_down, mw->output_type);
     }
 
     // Verify critical tensors are present

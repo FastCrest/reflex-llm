@@ -50,6 +50,18 @@ void gemv_q4(
     cudaStream_t   stream
 );
 
+// GGML K-quant GEMV dispatcher. Supports Q4_K, Q5_K and Q6_K, which are
+// mixed within llama.cpp's *_K_M quantization presets.
+void gemv_quant(
+    half*          y,
+    const void*    W,
+    int            ggml_type,
+    const half*    x,
+    int            M,
+    int            K,
+    cudaStream_t   stream
+);
+
 // ── Fused RMSNorm + Residual Add ────────────────────────────────────────
 // input = RMSNorm(x + residual) * weight
 // One read of x, one read of residual, one write of output.
