@@ -26,10 +26,16 @@ bool KVCachePool::init(const Config& cfg) {
     fprintf(stderr, "[kv_cache] Allocating fast pool: %ld MB (%d tokens)\n",
             fast_bytes / (1024*1024), cfg.max_context);
 
-    // Fast pool: pinned memory (GPU + CPU accessible, no page faults)
-    cudaError_t err = cudaMallocHost(&gpu_pool_, fast_bytes);
+    // Fast pool: unified memory (GPU + CPU access via same pointer,
+    // page-migration on demand). Same rationale as ScratchPool — on
+    // Tegra, cudaMallocHost's host pointer is NOT automatically GPU-
+    // visible without explicit mapping flags + a separate device-pointer
+    // lookup, and the symptom of getting that wrong is "kernel writes go
+    // nowhere visible to the CPU." cudaMallocManaged gives a single
+    // pointer that works from both sides.
+    cudaError_t err = cudaMallocManaged(&gpu_pool_, fast_bytes);
     if (err != cudaSuccess) {
-        fprintf(stderr, "[kv_cache] FATAL: cudaMallocHost failed: %s\n",
+        fprintf(stderr, "[kv_cache] FATAL: cudaMallocManaged failed: %s\n",
                 cudaGetErrorString(err));
         return false;
     }
@@ -54,7 +60,8 @@ bool KVCachePool::init(const Config& cfg) {
 }
 
 void KVCachePool::destroy() {
-    if (gpu_pool_) { cudaFreeHost(gpu_pool_); gpu_pool_ = nullptr; }
+    // cudaFree pairs with cudaMallocManaged (NOT cudaFreeHost).
+    if (gpu_pool_) { cudaFree(gpu_pool_); gpu_pool_ = nullptr; }
     if (cpu_pool_) { free(cpu_pool_); cpu_pool_ = nullptr; }
     used_tokens_ = 0;
     gpu_tokens_ = 0;
