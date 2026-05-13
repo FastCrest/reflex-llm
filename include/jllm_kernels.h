@@ -33,6 +33,15 @@ constexpr int ATTENTION_TILE_Q  = 32;   // query tokens per tile
 constexpr int ATTENTION_TILE_KV = 64;   // KV tokens per tile
 constexpr int BLOCK_SIZE = 128;         // threads per block (4 warps, good occupancy)
 
+// The GGUF loader keeps quantized tensors in the mmap'd model file.  CUDA
+// kernels cannot safely dereference those host pointers directly; the loader
+// registers the mmap as mapped host memory and records the device-visible base
+// address here. Returns nullptr when no mapped alias is available.
+const void* resolve_mapped_weight_device_ptr(const void* host_ptr);
+void register_mapped_weight_region(const void* host_base, const void* device_base,
+                                   int64_t bytes);
+void clear_mapped_weight_region(const void* host_base);
+
 // ── Quantized GEMV (decode: batch=1, the hot path) ──────────────────────
 // Q4_K dequant fused into GEMV — never writes dequantized weights to DRAM
 //

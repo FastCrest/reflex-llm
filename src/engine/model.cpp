@@ -18,6 +18,47 @@
 
 namespace jllm {
 
+namespace {
+
+struct MappedWeightRegion {
+    const char* host_base = nullptr;
+    const char* device_base = nullptr;
+    int64_t bytes = 0;
+};
+
+MappedWeightRegion g_mapped_weight_region;
+
+}  // namespace
+
+void register_mapped_weight_region(const void* host_base, const void* device_base,
+                                   int64_t bytes) {
+    g_mapped_weight_region.host_base = static_cast<const char*>(host_base);
+    g_mapped_weight_region.device_base = static_cast<const char*>(device_base);
+    g_mapped_weight_region.bytes = bytes;
+}
+
+void clear_mapped_weight_region(const void* host_base) {
+    if (g_mapped_weight_region.host_base == host_base) {
+        g_mapped_weight_region = {};
+    }
+}
+
+const void* resolve_mapped_weight_device_ptr(const void* host_ptr) {
+    if (!host_ptr || !g_mapped_weight_region.host_base ||
+        !g_mapped_weight_region.device_base) {
+        return nullptr;
+    }
+
+    const char* p = static_cast<const char*>(host_ptr);
+    const char* begin = g_mapped_weight_region.host_base;
+    const char* end = begin + g_mapped_weight_region.bytes;
+    if (p < begin || p >= end) {
+        return nullptr;
+    }
+
+    return g_mapped_weight_region.device_base + (p - begin);
+}
+
 // ── GGUF magic and header ────────────────────────────────────────────────
 
 static constexpr uint32_t GGUF_MAGIC = 0x46554747;  // "GGUF" as uint32 little-endian (bytes: G G U F)
@@ -241,14 +282,34 @@ bool load_gguf_weights(const std::string& path, void** weights, int64_t* size) {
     // Advise kernel: we'll read sequentially during load, then random during inference
     madvise(mapped, *size, MADV_SEQUENTIAL);
 
-    // On Jetson unified memory, mmap'd file is already in DRAM.
-    // For GPU access, we need it pinned or use cudaHostRegister.
-    // cudaHostRegister pins existing pages without copying.
-    cudaError_t err = cudaHostRegister(mapped, *size, cudaHostRegisterReadOnly);
+    // On Jetson unified memory, mmap'd file is already in DRAM. CUDA kernels
+    // still need a device-visible virtual address for it; raw host mmap
+    // pointers trap with illegal memory accesses. Register the mapping as
+    // mapped host memory and record the device alias for opt-in GPU GEMV.
+    (void)cudaSetDeviceFlags(cudaDeviceMapHost);
+    (void)cudaGetLastError();  // clear cudaErrorSetOnActiveProcess if any
+
+    cudaError_t err = cudaHostRegister(
+        mapped, *size,
+        cudaHostRegisterPortable | cudaHostRegisterReadOnly | cudaHostRegisterMapped);
     if (err != cudaSuccess) {
         fprintf(stderr, "[gguf] cudaHostRegister failed: %s (continuing without pin)\n",
                 cudaGetErrorString(err));
         // Not fatal — GPU can still read via page faults (slower but works)
+    } else {
+        void* mapped_device = nullptr;
+        err = cudaHostGetDevicePointer(&mapped_device, mapped, 0);
+        if (err == cudaSuccess && mapped_device) {
+            register_mapped_weight_region(mapped, mapped_device, *size);
+            fprintf(stderr, "[gguf] CUDA mapped host weights at %p -> %p\n",
+                    mapped, mapped_device);
+        } else {
+            fprintf(stderr,
+                    "[gguf] cudaHostGetDevicePointer failed: %s "
+                    "(GPU GEMV will use CPU fallback)\n",
+                    cudaGetErrorString(err));
+            (void)cudaGetLastError();
+        }
     }
 
     madvise(mapped, *size, MADV_RANDOM);  // switch to random access for inference

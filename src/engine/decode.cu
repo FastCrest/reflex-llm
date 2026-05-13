@@ -270,6 +270,7 @@ void Engine::unload() {
     kv_cache_.destroy();
     scratch_.destroy();
     if (weights_) {
+        clear_mapped_weight_region(weights_);
         cudaHostUnregister(weights_);
         munmap(weights_, weights_size_);  // now works — #include <sys/mman.h> added
         weights_ = nullptr;
