@@ -527,6 +527,14 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
             else if (strstr(ti.name, "ffn_down.weight")) {
                 lw.w_down = ptr; lw.type_w_down = ti.type;
             }
+            else if (strstr(ti.name, "attn_q_norm.weight")) {
+                lw.q_norm = ptr;
+                lw.qk_norm_type = (ti.type == 0) ? 0 : 1;
+            }
+            else if (strstr(ti.name, "attn_k_norm.weight")) {
+                lw.k_norm = ptr;
+                lw.qk_norm_type = (ti.type == 0) ? 0 : 1;
+            }
             else if (strstr(ti.name, "attn_norm.weight")) {
                 lw.rms_attn = ptr;
                 lw.rms_type = (ti.type == 0) ? 0 : 1;
@@ -588,6 +596,10 @@ bool load_and_map_weights(const std::string& path, void** blob, int64_t* blob_si
     for (int l = 0; l < cfg.n_layers; l++) {
         if (!mw->layers[l].wq)
             fprintf(stderr, "[model] WARNING: blk.%d.attn_q.weight not found\n", l);
+        if (!mw->layers[l].q_norm)
+            fprintf(stderr, "[model] WARNING: blk.%d.attn_q_norm.weight not found\n", l);
+        if (!mw->layers[l].k_norm)
+            fprintf(stderr, "[model] WARNING: blk.%d.attn_k_norm.weight not found\n", l);
     }
 
     return mapped > 0;

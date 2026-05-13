@@ -300,8 +300,10 @@ static bool copy_weight_to_device(const void* src, size_t bytes, void** dst) {
 }
 
 static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
+                                     int head_dim,
                                      std::vector<void*>& owned) {
     const size_t norm_bytes = (size_t)hidden_dim * sizeof(float);
+    const size_t qk_norm_bytes = (size_t)head_dim * sizeof(float);
 
     for (int l = 0; l < mw.n_layers; l++) {
         auto& lw = mw.layers[l];
@@ -321,14 +323,32 @@ static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
         owned.push_back(ffn);
         lw.rms_attn = attn;
         lw.rms_ffn = ffn;
+
+        if (lw.q_norm && lw.k_norm) {
+            if (lw.qk_norm_type != 0) {
+                fprintf(stderr, "[model] unsupported FP16 Q/K RMSNorm materialization in layer %d\n", l);
+                return false;
+            }
+            void* qn = nullptr;
+            void* kn = nullptr;
+            if (!copy_weight_to_device(lw.q_norm, qk_norm_bytes, &qn)) return false;
+            if (!copy_weight_to_device(lw.k_norm, qk_norm_bytes, &kn)) {
+                cudaFree(qn);
+                return false;
+            }
+            owned.push_back(qn);
+            owned.push_back(kn);
+            lw.q_norm = qn;
+            lw.k_norm = kn;
+        }
     }
 
     void* out_norm = nullptr;
     if (!copy_weight_to_device(mw.output_norm, norm_bytes, &out_norm)) return false;
     owned.push_back(out_norm);
     mw.output_norm = out_norm;
-    fprintf(stderr, "[model] Materialized %d RMSNorm tensors on device\n",
-            mw.n_layers * 2 + 1);
+    fprintf(stderr, "[model] Materialized up to %d RMSNorm tensors on device\n",
+            mw.n_layers * 4 + 1);
     return true;
 }
 
@@ -347,6 +367,7 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
         return false;
     }
     if (!materialize_norm_weights(model_weights_, config_.hidden_dim,
+                                  config_.head_dim,
                                   device_weight_copies_)) {
         fprintf(stderr, "[engine] Failed to materialize norm weights\n");
         return false;
@@ -494,6 +515,19 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     gemv_quant(q_buf, lw.wq, lw.type_wq, normed, config_.n_heads * config_.head_dim, H, stream_);
     gemv_quant(k_buf, lw.wk, lw.type_wk, normed, KV_DIM, H, stream_);
     gemv_quant(v_buf, lw.wv, lw.type_wv, normed, KV_DIM, H, stream_);
+
+    if (lw.q_norm && lw.k_norm) {
+        half* q_zero = (half*)scratch_.get(config_.n_heads * config_.head_dim * sizeof(half));
+        half* k_zero = (half*)scratch_.get(KV_DIM * sizeof(half));
+        cudaMemsetAsync(q_zero, 0, config_.n_heads * config_.head_dim * sizeof(half), stream_);
+        cudaMemsetAsync(k_zero, 0, KV_DIM * sizeof(half), stream_);
+        fused_rmsnorm_residual(q_buf, q_buf, q_zero, lw.q_norm,
+                               config_.n_heads, config_.head_dim,
+                               1e-6f, lw.qk_norm_type == 0, stream_);
+        fused_rmsnorm_residual(k_buf, k_buf, k_zero, lw.k_norm,
+                               config_.n_kv_heads, config_.head_dim,
+                               1e-6f, lw.qk_norm_type == 0, stream_);
+    }
 
     // 3. RoPE
     rope_inplace(q_buf, k_buf, config_.n_heads, config_.n_kv_heads,

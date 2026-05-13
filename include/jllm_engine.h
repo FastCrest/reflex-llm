@@ -75,6 +75,8 @@ struct LayerWeights {
     const void* w_down   = nullptr;
     const void* rms_attn = nullptr;  // FP32 or FP16 depending on GGUF
     const void* rms_ffn  = nullptr;  // FP32 or FP16 depending on GGUF
+    const void* q_norm   = nullptr;  // Qwen3 per-head Q RMSNorm [head_dim]
+    const void* k_norm   = nullptr;  // Qwen3 per-head K RMSNorm [head_dim]
     int type_wq     = 12;            // GGML tensor type for quantized matvec
     int type_wk     = 12;
     int type_wv     = 12;
@@ -83,6 +85,7 @@ struct LayerWeights {
     int type_w_up   = 12;
     int type_w_down = 12;
     int rms_type = 0;                // 0=F32, 1=F16
+    int qk_norm_type = 0;            // 0=F32, 1=F16
     const half* sq       = nullptr;
     const half* sk       = nullptr;
     const half* sv       = nullptr;
