@@ -128,15 +128,72 @@ static void dequant_q4k_row(float* out, const void* data, int token_id, int hidd
     }
 }
 
+// Q6_K block layout (matches llama.cpp ggml-quants.h):
+//   uint8_t ql[128]     // low 4 bits of 256 6-bit quants
+//   uint8_t qh[64]      // high 2 bits of 256 6-bit quants
+//   int8_t  scales[16]  // 16 sub-block scales (signed 8-bit)
+//   uint16_t d          // FP16 super-block scale
+// Total: 128 + 64 + 16 + 2 = 210 bytes per 256-element block.
+//
+// Many GGUF emitters quantize token_embd.weight to Q6_K even in Q4_K_M
+// builds because the embedding accuracy disproportionately affects
+// quality. Qwen3-4B-Q4_K_M is one such build.
+struct embd_block_q6_K {
+    uint8_t  ql[128];
+    uint8_t  qh[64];
+    int8_t   scales[16];
+    uint16_t d_raw;
+};
+static_assert(sizeof(embd_block_q6_K) == 210, "Q6_K block must be 210 bytes");
+
+static void dequant_q6k_row(float* out, const void* data, int token_id, int hidden_dim) {
+    int blocks_per_row = hidden_dim / 256;
+    int block_bytes = 210;
+    const uint8_t* row_data = (const uint8_t*)data + (int64_t)token_id * blocks_per_row * block_bytes;
+
+    // Mirrors llama.cpp's `dequantize_row_q6_K` exactly. Each 256-element
+    // super-block is processed in two halves of 128 elements; within each
+    // half, 32 lanes assemble four 6-bit quants from ql (low nibble) +
+    // qh (high 2 bits) and scale by per-16-element sub-block scales.
+    for (int b = 0; b < blocks_per_row; b++) {
+        const embd_block_q6_K* blk = (const embd_block_q6_K*)(row_data + b * block_bytes);
+        const float d = fp16_to_float(blk->d_raw);
+
+        float* y = out + b * 256;
+        const uint8_t* ql = blk->ql;
+        const uint8_t* qh = blk->qh;
+        const int8_t*  sc = blk->scales;
+
+        for (int n = 0; n < 256; n += 128) {
+            for (int l = 0; l < 32; l++) {
+                const int is = l / 16;
+                int q1 = (int)(ql[l]      & 0xF) | (((int)(qh[l] >> 0) & 3) << 4);
+                int q2 = (int)(ql[l + 32] & 0xF) | (((int)(qh[l] >> 2) & 3) << 4);
+                int q3 = (int)(ql[l]      >> 4)  | (((int)(qh[l] >> 4) & 3) << 4);
+                int q4 = (int)(ql[l + 32] >> 4)  | (((int)(qh[l] >> 6) & 3) << 4);
+                // 6-bit values are stored unsigned 0..63 but interpreted as
+                // signed -32..31. Subtract 32 to recover the signed value.
+                y[l +  0] = d * (float)sc[is + 0] * (float)(q1 - 32);
+                y[l + 32] = d * (float)sc[is + 2] * (float)(q2 - 32);
+                y[l + 64] = d * (float)sc[is + 4] * (float)(q3 - 32);
+                y[l + 96] = d * (float)sc[is + 6] * (float)(q4 - 32);
+            }
+            y  += 128;
+            ql += 64;
+            qh += 32;
+            sc += 8;
+        }
+    }
+}
+
 static void dequant_embedding(half* dst, const void* embd_data, int token_id,
                                int hidden_dim, int embd_type, cudaStream_t stream) {
     float h_row[8192];  // max hidden_dim = 8192
     half  h_fp16[8192];
 
     if (embd_type == 12) {
-        // Q4_K: dequantize on CPU
+        // Q4_K (GGML_TYPE_Q4_K)
         dequant_q4k_row(h_row, embd_data, token_id, hidden_dim);
-        // Debug: print first few values to verify dequant
         static bool first = true;
         if (first) {
             fprintf(stderr, "[embd] Q4_K dequant token %d, first 8 values: ", token_id);
@@ -147,15 +204,43 @@ static void dequant_embedding(half* dst, const void* embd_data, int token_id,
         }
         for (int i = 0; i < hidden_dim; i++)
             h_fp16[i] = __float2half(h_row[i]);
+    } else if (embd_type == 14) {
+        // Q6_K (GGML_TYPE_Q6_K) — common for token_embd.weight in Q4_K_M
+        // builds because embedding accuracy disproportionately affects
+        // overall model quality, so the embedding tensor gets one notch
+        // higher precision than the rest of the model.
+        dequant_q6k_row(h_row, embd_data, token_id, hidden_dim);
+        static bool first = true;
+        if (first) {
+            fprintf(stderr, "[embd] Q6_K dequant token %d, first 8 values: ", token_id);
+            for (int i = 0; i < 8 && i < hidden_dim; i++)
+                fprintf(stderr, "%.4f ", h_row[i]);
+            fprintf(stderr, "\n");
+            first = false;
+        }
+        for (int i = 0; i < hidden_dim; i++)
+            h_fp16[i] = __float2half(h_row[i]);
     } else if (embd_type == 0) {
-        // F32: convert to FP16
+        // F32
         const float* src = (const float*)embd_data + (int64_t)token_id * hidden_dim;
         for (int i = 0; i < hidden_dim; i++)
             h_fp16[i] = __float2half(src[i]);
-    } else {
+    } else if (embd_type == 1) {
         // F16: direct copy
         const half* src = (const half*)embd_data + (int64_t)token_id * hidden_dim;
         memcpy(h_fp16, src, hidden_dim * sizeof(half));
+    } else {
+        // Unsupported quant type — emit a diagnostic so this isn't silent.
+        // Falling back to reading raw bytes as FP16 (the previous behavior)
+        // would produce garbage and looks like a kernel bug downstream.
+        fprintf(stderr,
+                "[embd] FATAL: unsupported embedding quant type %d "
+                "(supported: 0=F32, 1=F16, 12=Q4_K, 14=Q6_K). "
+                "Cannot proceed — model output will be garbage.\n",
+                embd_type);
+        // Zero out the destination so at least downstream NaNs don't
+        // propagate from random memory.
+        memset(h_fp16, 0, hidden_dim * sizeof(half));
     }
 
     cudaMemcpyAsync(dst, h_fp16, hidden_dim * sizeof(half), cudaMemcpyHostToDevice, stream);
