@@ -379,17 +379,12 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     int kv_bytes = params.kv_int8 ? 1 : 2;
     int auto_ctx = budget_.max_context(config_.n_layers, config_.n_kv_heads, config_.head_dim, kv_bytes);
 
-    // Cap the implicit auto-context to something the Tegra NvMap pinned-host
-    // allocator can actually hand us. `MemoryBudget::max_kv_mb()` is computed
-    // against total DRAM, but cudaMallocHost (pinned) on Tegra goes through
-    // NvMap which has a much lower quota — typically ~1.5 GB. Models like
-    // Qwen3-4B (36 layers × 8 KV heads × 80 head_dim) report ~40k auto
-    // tokens which then triggers a 1.8 GB pinned allocation that NvMap
-    // rejects with "NvMapMemAllocInternalTagged: error 12". 8192 tokens is
-    // plenty for chat workloads and stays well under that ceiling for every
-    // model we care about. Users who explicitly pass `-c <N>` bypass this
-    // cap and are responsible for fitting in pinned memory.
-    constexpr int DEFAULT_AUTO_CONTEXT_CAP = 8192;
+    // Cap the implicit auto-context to something that leaves real headroom on
+    // 8 GB Jetsons. Qwen3-4B uses 128-dim K/V heads, so 8192 tokens allocates
+    // ~1.44 GB of KV (including overflow) after a 2.3 GB mmap'd model and can
+    // push the budget negative. Users who explicitly pass `-c <N>` bypass this
+    // cap and are responsible for fitting in memory.
+    const int DEFAULT_AUTO_CONTEXT_CAP = (config_.head_dim >= 128) ? 4096 : 8192;
     if (params.context_limit > 0) {
         // User explicitly asked for a context size — honor it, but still
         // clamp to the model's max_seq_len.
@@ -421,8 +416,11 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     budget_.kv_cache_mb = kv_cache_.capacity_bytes() / (1024 * 1024);
 
     int64_t scratch_bytes = 0;
+    const int q_dim = config_.n_heads * config_.head_dim;
+    const int kv_dim = config_.n_kv_heads * config_.head_dim;
     scratch_bytes += config_.hidden_dim * sizeof(half) * 8;
-    scratch_bytes += config_.n_heads * config_.head_dim * sizeof(half) * 3;
+    scratch_bytes += q_dim * sizeof(half) * 3;   // q, attention output, q zero
+    scratch_bytes += kv_dim * sizeof(half) * 3;  // k, v, k zero
     scratch_bytes += config_.intermediate_dim * sizeof(half) * 4;
     scratch_bytes += config_.vocab_size * sizeof(float);
     scratch_bytes += config_.vocab_size * sizeof(half);
@@ -451,15 +449,16 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
 void Engine::transformer_layer(int layer, int pos, half* x) {
     const auto& lw = model_weights_.layers[layer];
     int H = config_.hidden_dim;
+    int Q_DIM = config_.n_heads * config_.head_dim;
     int KV_DIM = config_.n_kv_heads * config_.head_dim;
     int I = config_.intermediate_dim;
 
     // Scratch buffers (bump allocator)
     half* normed   = (half*)scratch_.get(H * sizeof(half));
-    half* q_buf    = (half*)scratch_.get(config_.n_heads * config_.head_dim * sizeof(half));
+    half* q_buf    = (half*)scratch_.get(Q_DIM * sizeof(half));
     half* k_buf    = (half*)scratch_.get(KV_DIM * sizeof(half));
     half* v_buf    = (half*)scratch_.get(KV_DIM * sizeof(half));
-    half* attn_out = (half*)scratch_.get(H * sizeof(half));
+    half* attn_out = (half*)scratch_.get(Q_DIM * sizeof(half));
     half* attn_proj = (half*)scratch_.get(H * sizeof(half));
     half* x2       = (half*)scratch_.get(H * sizeof(half));  // after first residual
     half* normed2  = (half*)scratch_.get(H * sizeof(half));
@@ -514,14 +513,14 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     }
 
     // 2. QKV projections
-    gemv_quant(q_buf, lw.wq, lw.type_wq, normed, config_.n_heads * config_.head_dim, H, stream_);
+    gemv_quant(q_buf, lw.wq, lw.type_wq, normed, Q_DIM, H, stream_);
     gemv_quant(k_buf, lw.wk, lw.type_wk, normed, KV_DIM, H, stream_);
     gemv_quant(v_buf, lw.wv, lw.type_wv, normed, KV_DIM, H, stream_);
 
     if (lw.q_norm && lw.k_norm) {
-        half* q_zero = (half*)scratch_.get(config_.n_heads * config_.head_dim * sizeof(half));
+        half* q_zero = (half*)scratch_.get(Q_DIM * sizeof(half));
         half* k_zero = (half*)scratch_.get(KV_DIM * sizeof(half));
-        cudaMemsetAsync(q_zero, 0, config_.n_heads * config_.head_dim * sizeof(half), stream_);
+        cudaMemsetAsync(q_zero, 0, Q_DIM * sizeof(half), stream_);
         cudaMemsetAsync(k_zero, 0, KV_DIM * sizeof(half), stream_);
         fused_rmsnorm_residual(q_buf, q_buf, q_zero, lw.q_norm,
                                config_.n_heads, config_.head_dim,
@@ -555,7 +554,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
                           pos + 1, scale, gen_params_.kv_int8, nullptr, stream_);
 
     // 6. Output projection
-    gemv_quant(attn_proj, lw.wo, lw.type_wo, attn_out, H, H, stream_);
+    gemv_quant(attn_proj, lw.wo, lw.type_wo, attn_out, H, Q_DIM, stream_);
 
     // 7. FIRST RESIDUAL: x2 = x + attn_proj  (BUG #2 FIX)
     vec_add(x2, x, attn_proj, H, stream_);
