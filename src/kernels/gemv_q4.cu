@@ -20,6 +20,14 @@ static bool debug_kernels_enabled() {
     return enabled;
 }
 
+static bool fast_gemv_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_GEMV");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 // Use raw uint16 instead of half2 to guarantee no padding
 struct __attribute__((packed)) block_q4_K {
     uint16_t d_raw;       // FP16 super-block scale
@@ -267,6 +275,43 @@ void gemv_q4(half* y, const void* W_q4, const half* scales, const half* x,
     gemv_quant(y, W_q4, 12, x, M, K, stream);
 }
 
+static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
+                           const half* x, int M, int K, cudaStream_t stream) {
+    const int block = 128;
+    const int grid = (M + 3) / 4;
+
+    switch (ggml_type) {
+        case 12:
+            gemv_q4k_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q4_K*)W, x, M, K);
+            break;
+        case 13:
+            gemv_q5k_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q5_K*)W, x, M, K);
+            break;
+        case 14:
+            gemv_q6k_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q6_K*)W, x, M, K);
+            break;
+        default:
+            fprintf(stderr, "[GEMV] FATAL: unsupported GPU GGML type %d (M=%d K=%d)\n",
+                    ggml_type, M, K);
+            return false;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GEMV] GPU launch failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+__global__ void half_to_float_kernel(float* out, const half* in, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < n) out[i] = __half2float(in[i]);
+}
+
 static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type,
                            const std::vector<half>& h_x, int M, int K) {
     if (ggml_type != 12 && ggml_type != 13 && ggml_type != 14) {
@@ -383,6 +428,28 @@ static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type
 
 void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
                 int M, int K, cudaStream_t stream) {
+    if (fast_gemv_enabled()) {
+        if (!gemv_quant_gpu(y, W, ggml_type, x, M, K, stream)) {
+            cudaMemsetAsync(y, 0, M * sizeof(half), stream);
+            return;
+        }
+
+        static int dbg_count = 0;
+        if (debug_kernels_enabled() && dbg_count < 3) {
+            cudaStreamSynchronize(stream);
+            half h_y[8], h_x[8];
+            cudaMemcpy(h_y, y, 8 * sizeof(half), cudaMemcpyDeviceToHost);
+            cudaMemcpy(h_x, x, 8 * sizeof(half), cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[GEMV-GPU #%d] type=%d M=%d K=%d out: ", dbg_count, ggml_type, M, K);
+            for (int i = 0; i < 8 && i < M; i++) fprintf(stderr, "%.4f ", __half2float(h_y[i]));
+            fprintf(stderr, " | in: ");
+            for (int i = 0; i < 8; i++) fprintf(stderr, "%.4f ", __half2float(h_x[i]));
+            fprintf(stderr, "\n");
+            dbg_count++;
+        }
+        return;
+    }
+
     cudaStreamSynchronize(stream);
 
     std::vector<half> h_x(K);
@@ -415,6 +482,30 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
 
 void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
                     int M, int K, cudaStream_t stream) {
+    if (fast_gemv_enabled()) {
+        half* tmp = nullptr;
+        cudaError_t err = cudaMalloc(&tmp, M * sizeof(half));
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[GEMV] cudaMalloc tmp logits failed: %s\n",
+                    cudaGetErrorString(err));
+            cudaMemsetAsync(y, 0, M * sizeof(float), stream);
+            return;
+        }
+
+        if (!gemv_quant_gpu(tmp, W, ggml_type, x, M, K, stream)) {
+            cudaMemsetAsync(y, 0, M * sizeof(float), stream);
+            cudaFree(tmp);
+            return;
+        }
+
+        int block = 256;
+        int grid = (M + block - 1) / block;
+        half_to_float_kernel<<<grid, block, 0, stream>>>(y, tmp, M);
+        cudaStreamSynchronize(stream);
+        cudaFree(tmp);
+        return;
+    }
+
     cudaStreamSynchronize(stream);
 
     std::vector<half> h_x(K);
