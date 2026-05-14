@@ -244,137 +244,6 @@ __device__ __forceinline__ float dot_q6k_row(
     return acc;
 }
 
-__device__ __forceinline__ float dot_q4k_block(
-    const block_q4_K& blk,
-    const half*       __restrict__ x_tile,
-    int lane)
-{
-    float acc = 0.0f;
-    const float dall = raw_fp16_to_float(blk.d_raw);
-    const float dmin = raw_fp16_to_float(blk.dmin_raw);
-
-    #pragma unroll
-    for (int il = 0; il < 4; il++) {
-        const int is = 2 * il;
-
-        uint8_t sc1, m1, sc2, m2;
-        get_scale_min_k4(is + 0, blk.scales, sc1, m1);
-        get_scale_min_k4(is + 1, blk.scales, sc2, m2);
-
-        const float d1 = dall * sc1;
-        const float dm1 = dmin * m1;
-        const float d2 = dall * sc2;
-        const float dm2 = dmin * m2;
-
-        const uint8_t* q = blk.qs + 32 * il;
-        const int k_lo = 64 * il + lane;
-        const int k_hi = k_lo + 32;
-
-        const float w_lo = d1 * (q[lane] & 0xF) - dm1;
-        const float w_hi = d2 * (q[lane] >> 4)  - dm2;
-
-        acc += w_lo * __half2float(x_tile[k_lo]);
-        acc += w_hi * __half2float(x_tile[k_hi]);
-    }
-
-    return acc;
-}
-
-__device__ __forceinline__ float dot_q5k_block(
-    const block_q5_K& blk,
-    const half*       __restrict__ x_tile,
-    int lane)
-{
-    float acc = 0.0f;
-    const float dall = raw_fp16_to_float(blk.d_raw);
-    const float dmin = raw_fp16_to_float(blk.dmin_raw);
-
-    uint8_t u1 = 1;
-    uint8_t u2 = 2;
-    #pragma unroll
-    for (int il = 0; il < 4; il++) {
-        const int is = 2 * il;
-        uint8_t sc1, m1, sc2, m2;
-        get_scale_min_k4(is + 0, blk.scales, sc1, m1);
-        get_scale_min_k4(is + 1, blk.scales, sc2, m2);
-
-        const float d1 = dall * sc1;
-        const float dm1 = dmin * m1;
-        const float d2 = dall * sc2;
-        const float dm2 = dmin * m2;
-
-        const uint8_t* ql = blk.qs + 32 * il;
-        const uint8_t* qh = blk.qh;
-        const int k_lo = 64 * il + lane;
-        const int k_hi = k_lo + 32;
-
-        const float w_lo = d1 * ((ql[lane] & 0xF) + ((qh[lane] & u1) ? 16 : 0)) - dm1;
-        const float w_hi = d2 * ((ql[lane] >> 4)  + ((qh[lane] & u2) ? 16 : 0)) - dm2;
-
-        acc += w_lo * __half2float(x_tile[k_lo]);
-        acc += w_hi * __half2float(x_tile[k_hi]);
-
-        u1 <<= 2;
-        u2 <<= 2;
-    }
-
-    return acc;
-}
-
-__device__ __forceinline__ float dot_q6k_block(
-    const block_q6_K& blk,
-    const half*       __restrict__ x_tile,
-    int lane)
-{
-    float acc = 0.0f;
-    const float d = raw_fp16_to_float(blk.d_raw);
-
-    #pragma unroll
-    for (int n = 0; n < QK_K; n += 128) {
-        const uint8_t* ql = blk.ql + (n / 128) * 64;
-        const uint8_t* qh = blk.qh + (n / 128) * 32;
-        const int8_t*  sc = blk.scales + (n / 128) * 8;
-        const int is = lane / 16;
-
-        const int q1 = (int)((ql[lane +  0] & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
-        const int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
-        const int q3 = (int)((ql[lane +  0] >>  4) | (((qh[lane] >> 4) & 3) << 4)) - 32;
-        const int q4 = (int)((ql[lane + 32] >>  4) | (((qh[lane] >> 6) & 3) << 4)) - 32;
-
-        const int k0 = n + lane;
-        acc += d * (float)sc[is + 0] * (float)q1 * __half2float(x_tile[k0 +  0]);
-        acc += d * (float)sc[is + 2] * (float)q2 * __half2float(x_tile[k0 + 32]);
-        acc += d * (float)sc[is + 4] * (float)q3 * __half2float(x_tile[k0 + 64]);
-        acc += d * (float)sc[is + 6] * (float)q4 * __half2float(x_tile[k0 + 96]);
-    }
-
-    return acc;
-}
-
-__device__ __forceinline__ float dot_quant_block(
-    const void* __restrict__ W,
-    int ggml_type,
-    int row,
-    int block_idx,
-    int n_blocks,
-    const half* __restrict__ x_tile,
-    int lane)
-{
-    switch (ggml_type) {
-        case 12:
-            return dot_q4k_block(((const block_q4_K*)W)[(int64_t)row * n_blocks + block_idx],
-                                 x_tile, lane);
-        case 13:
-            return dot_q5k_block(((const block_q5_K*)W)[(int64_t)row * n_blocks + block_idx],
-                                 x_tile, lane);
-        case 14:
-            return dot_q6k_block(((const block_q6_K*)W)[(int64_t)row * n_blocks + block_idx],
-                                 x_tile, lane);
-        default:
-            return 0.0f;
-    }
-}
-
 __device__ __forceinline__ float dot_quant_row(
     const void* __restrict__ W,
     int ggml_type,
@@ -413,24 +282,13 @@ __global__ void gemv_q4k_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q4k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q4k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = __float2half(acc);
 }
 
@@ -442,24 +300,13 @@ __global__ void gemv_q5k_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q5k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q5k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = __float2half(acc);
 }
 
@@ -471,24 +318,13 @@ __global__ void gemv_q6k_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q6k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q6k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = __float2half(acc);
 }
 
@@ -500,24 +336,13 @@ __global__ void gemv_q4k_f32_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q4k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q4k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = acc;
 }
 
@@ -529,24 +354,13 @@ __global__ void gemv_q5k_f32_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q5k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q5k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = acc;
 }
 
@@ -558,24 +372,13 @@ __global__ void gemv_q6k_f32_kernel(
 {
     const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
-    const bool active = row < M;
+    if (row >= M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_q6k_block(W[(int64_t)row * n_blocks + b], x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_q6k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
     acc = warp_reduce_sum(acc);
 
-    if (active && lane == 0)
+    if (lane == 0)
         y[row] = acc;
 }
 
@@ -668,15 +471,15 @@ __global__ void gemv_quant_pair_kernel(
     const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int total_M = M0 + M1;
-    const bool active = row < total_M;
+    if (row >= total_M) return;
 
     const int n_blocks = K / QK_K;
-    half* y = y0;
-    const void* W = W0;
+    half* y = nullptr;
+    const void* W = nullptr;
     int type = 0;
     int local_row = row;
 
-    if (!active || row < M0) {
+    if (row < M0) {
         y = y0;
         W = W0;
         type = type0;
@@ -687,20 +490,9 @@ __global__ void gemv_quant_pair_kernel(
         local_row = row - M0;
     }
 
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_quant_block(W, type, local_row, b, n_blocks, x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_quant_row(W, type, local_row, n_blocks, x, lane);
     acc = warp_reduce_sum(acc);
-    if (active && lane == 0)
+    if (lane == 0)
         y[local_row] = __float2half(acc);
 }
 
@@ -724,15 +516,15 @@ __global__ void gemv_quant_triple_kernel(
     const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int total_M = M0 + M1 + M2;
-    const bool active = row < total_M;
+    if (row >= total_M) return;
 
     const int n_blocks = K / QK_K;
-    half* y = y0;
-    const void* W = W0;
+    half* y = nullptr;
+    const void* W = nullptr;
     int type = 0;
     int local_row = row;
 
-    if (!active || row < M0) {
+    if (row < M0) {
         y = y0;
         W = W0;
         type = type0;
@@ -748,44 +540,10 @@ __global__ void gemv_quant_triple_kernel(
         local_row = row - M0 - M1;
     }
 
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active) {
-            acc += dot_quant_block(W, type, local_row, b, n_blocks, x_tile, lane);
-        }
-        __syncthreads();
-    }
+    float acc = dot_quant_row(W, type, local_row, n_blocks, x, lane);
     acc = warp_reduce_sum(acc);
-    if (active && lane == 0)
+    if (lane == 0)
         y[local_row] = __float2half(acc);
-}
-
-template<int Type>
-__device__ __forceinline__ float dot_quant_block_t(
-    const void* __restrict__ W,
-    int row,
-    int block_idx,
-    int n_blocks,
-    const half* __restrict__ x_tile,
-    int lane)
-{
-    if constexpr (Type == 12) {
-        return dot_q4k_block(((const block_q4_K*)W)[(int64_t)row * n_blocks + block_idx],
-                             x_tile, lane);
-    } else if constexpr (Type == 13) {
-        return dot_q5k_block(((const block_q5_K*)W)[(int64_t)row * n_blocks + block_idx],
-                             x_tile, lane);
-    } else if constexpr (Type == 14) {
-        return dot_q6k_block(((const block_q6_K*)W)[(int64_t)row * n_blocks + block_idx],
-                             x_tile, lane);
-    } else {
-        return 0.0f;
-    }
 }
 
 template<int Type>
@@ -825,40 +583,19 @@ __global__ void gemv_quant_pair_typed_kernel(
     const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int total_M = M0 + M1;
-    const bool active = row < total_M;
+    if (row >= total_M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    int local_row = row;
-    int which = 0;
-    if (!active || row < M0) {
-        which = 0;
+    float acc;
+    if (row < M0) {
+        acc = dot_quant_row_t<Type0>(W0, row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y0[row] = __float2half(acc);
     } else {
-        which = 1;
-        local_row = row - M0;
-    }
-
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active && which == 0) {
-            acc += dot_quant_block_t<Type0>(W0, row, b, n_blocks, x_tile, lane);
-        } else if (active) {
-            acc += dot_quant_block_t<Type1>(W1, local_row, b, n_blocks, x_tile, lane);
-        }
-        __syncthreads();
-    }
-
-    acc = warp_reduce_sum(acc);
-    if (active && lane == 0) {
-        if (which == 0) {
-            y0[row] = __float2half(acc);
-        } else {
-            y1[local_row] = __float2half(acc);
-        }
+        const int local_row = row - M0;
+        acc = dot_quant_row_t<Type1>(W1, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y1[local_row] = __float2half(acc);
     }
 }
 
@@ -880,47 +617,24 @@ __global__ void gemv_quant_triple_typed_kernel(
     const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
     const int lane = threadIdx.x & 31;
     const int total_M = M0 + M1 + M2;
-    const bool active = row < total_M;
+    if (row >= total_M) return;
 
     const int n_blocks = K / QK_K;
-    __shared__ half x_tile[QK_K];
-    float acc = 0.0f;
-    int local_row = row;
-    int which = 0;
-    if (!active || row < M0) {
-        which = 0;
+    float acc;
+    if (row < M0) {
+        acc = dot_quant_row_t<Type0>(W0, row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y0[row] = __float2half(acc);
     } else if (row < M0 + M1) {
-        which = 1;
-        local_row = row - M0;
+        const int local_row = row - M0;
+        acc = dot_quant_row_t<Type1>(W1, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y1[local_row] = __float2half(acc);
     } else {
-        which = 2;
-        local_row = row - M0 - M1;
-    }
-
-    for (int b = 0; b < n_blocks; b++) {
-        for (int i = threadIdx.x; i < QK_K; i += blockDim.x) {
-            x_tile[i] = x[b * QK_K + i];
-        }
-        __syncthreads();
-        if (active && which == 0) {
-            acc += dot_quant_block_t<Type0>(W0, row, b, n_blocks, x_tile, lane);
-        } else if (active && which == 1) {
-            acc += dot_quant_block_t<Type1>(W1, local_row, b, n_blocks, x_tile, lane);
-        } else if (active) {
-            acc += dot_quant_block_t<Type2>(W2, local_row, b, n_blocks, x_tile, lane);
-        }
-        __syncthreads();
-    }
-
-    acc = warp_reduce_sum(acc);
-    if (active && lane == 0) {
-        if (which == 0) {
-            y0[row] = __float2half(acc);
-        } else if (which == 1) {
-            y1[local_row] = __float2half(acc);
-        } else {
-            y2[local_row] = __float2half(acc);
-        }
+        const int local_row = row - M0 - M1;
+        acc = dot_quant_row_t<Type2>(W2, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y2[local_row] = __float2half(acc);
     }
 }
 
