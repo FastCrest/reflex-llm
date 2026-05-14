@@ -45,6 +45,35 @@ These numbers are correctness/brings-up numbers, not final throughput targets.
 The largest remaining cost is still K-quant weight bandwidth and the final
 vocabulary projection/sampling path.
 
+## Decode Throughput Optimization Branch
+
+Branch: `optimize/decode-throughput`
+Commit: `28a6bc1 Optimize decode hot path`
+Date: 2026-05-14
+
+Same hardware, model, prompt, context, power mode, and output as the Week 1
+smoke test. This branch changed the K-quant GEMV lane mapping, removed
+per-token CUDA temporary allocation in the logits path, reused a pinned host
+logits buffer, and added a fast top-k sampling path.
+
+| Metric | Main baseline | Optimization branch | Speedup |
+|--------|---------------|---------------------|---------|
+| Prompt eval | 12,377 ms, 1.5 tok/s | 2,406 ms, 7.5 tok/s | 5.0x |
+| Decode | 13,109 ms, 1.4 tok/s | 2,887 ms, 6.6 tok/s | 4.7x |
+| Decode tokens | 19 | 19 | same |
+| Peak memory | 3425 MB | 3687 MB | +262 MB |
+| Peak temperature | 50.0°C | 51.6°C | +1.6°C |
+
+Optimization branch output remained coherent:
+
+```
+Hello! It seems like you're testing the system. How can I assist you today?
+```
+
+This is still a short smoke benchmark because the model emits `<|im_end|>` after
+19 completion tokens. A longer fixed-length prompt is still needed before using
+these numbers as the final v0.2 benchmark.
+
 ## Why LLM Decode is Bandwidth-Bound
 
 LLM autoregressive decode generates one token at a time. Each token requires reading the **entire** weight matrix from DRAM:
