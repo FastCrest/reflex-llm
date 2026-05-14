@@ -396,9 +396,19 @@ static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
 static bool device_output_enabled() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_DEVICE_OUTPUT");
-        return v && strcmp(v, "0") != 0;
+        return !v || strcmp(v, "0") != 0;
     }();
     return enabled;
+}
+
+static int kv_overflow_context(int ctx) {
+    const char* v = getenv("JLLM_KV_OVERFLOW");
+    if (!v || strcmp(v, "0") == 0) return 0;
+    if (strcmp(v, "1") == 0) return ctx / 4;
+
+    int requested = atoi(v);
+    if (requested < 0) requested = 0;
+    return requested;
 }
 
 static size_t kquant_tensor_bytes(int ggml_type, int rows, int cols) {
@@ -517,7 +527,7 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     kv_cfg.n_kv_heads = config_.n_kv_heads;
     kv_cfg.head_dim = config_.head_dim;
     kv_cfg.max_context = ctx;
-    kv_cfg.overflow_context = ctx / 4;
+    kv_cfg.overflow_context = kv_overflow_context(ctx);
     kv_cfg.kv_type_bytes = kv_bytes;
     if (!kv_cache_.init(kv_cfg)) return false;
     budget_.kv_cache_mb = kv_cache_.capacity_bytes() / (1024 * 1024);
@@ -945,6 +955,7 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     auto t2 = Clock::now();
     int64_t peak_mem = 0;
     float peak_temp = 0;
+    const int kv_token_limit = kv_cache_.max_tokens();
     // The prefill loop already computed and cached the final prompt token at
     // position N-1. For the first sampled token, recompute that same position
     // to produce logits, then advance to position N for the sampled token.
@@ -953,6 +964,11 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     int pos = std::max(0, (int)prompt_tokens.size() - 1);
 
     for (int i = 0; i < params.max_tokens && !stop_flag_; i++) {
+        if (pos >= kv_token_limit) {
+            fprintf(stderr, "\n[engine] Stopping at context limit (%d tokens)\n",
+                    kv_token_limit);
+            break;
+        }
         if (!check_memory_and_thermal(pos)) {
             stats.oom_stops++;
             break;

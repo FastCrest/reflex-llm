@@ -42,6 +42,12 @@ Validated fast paths are now default:
 | RMSNorm | `JLLM_FAST_NORM=0` |
 | Decode attention | `JLLM_FAST_ATTN=0` |
 
+The output projection is materialized into CUDA device memory automatically
+when the memory budget allows it. Set `JLLM_DEVICE_OUTPUT=0` to force the
+mapped-host path. Extra CPU overflow KV tokens are opt-in with
+`JLLM_KV_OVERFLOW=<tokens>`; the default keeps memory available for hot decode
+weights first.
+
 These numbers are correctness/brings-up numbers, not final throughput targets.
 The largest remaining cost is still K-quant weight bandwidth and the final
 vocabulary projection/sampling path.
