@@ -186,6 +186,8 @@ private:
     cudaGraph_t     decode_graph_ = nullptr;
     cudaGraphExec_t decode_graph_exec_ = nullptr;
     bool            graph_captured_ = false;
+    float*          host_logits_ = nullptr;
+    int             host_logits_capacity_ = 0;
 
     void transformer_layer(int layer, int pos, half* x);
     int  decode_step(int pos);

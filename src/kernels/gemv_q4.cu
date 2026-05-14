@@ -100,7 +100,7 @@ __global__ void gemv_q4k_kernel(
 
     float acc = 0.0f;
 
-    for (int b = lane; b < n_blocks; b += 32) {
+    for (int b = 0; b < n_blocks; b++) {
         const block_q4_K& blk = row_blocks[b];
 
         float dall = raw_fp16_to_float(blk.d_raw);
@@ -108,6 +108,11 @@ __global__ void gemv_q4k_kernel(
 
         int k_base = b * QK_K;
 
+        // Use all 32 lanes for each 256-value K-quant block. The previous
+        // lane-per-block mapping left most of the warp idle for Qwen's
+        // K=2560 projections (10 blocks), including the large tied output
+        // projection. Each lane handles one byte from each 32-byte quant
+        // group and accumulates eight weights per block.
         for (int il = 0; il < 4; il++) {
             int is = 2 * il;
 
@@ -122,16 +127,14 @@ __global__ void gemv_q4k_kernel(
 
             const uint8_t* q = blk.qs + 32 * il;
 
-            for (int l = 0; l < 32; l++) {
-                int k_lo = k_base + 64 * il + l;
-                int k_hi = k_base + 64 * il + l + 32;
+            int k_lo = k_base + 64 * il + lane;
+            int k_hi = k_lo + 32;
 
-                float w_lo = d1 * (q[l] & 0xF) - dm1;
-                float w_hi = d2 * (q[l] >> 4)  - dm2;
+            float w_lo = d1 * (q[lane] & 0xF) - dm1;
+            float w_hi = d2 * (q[lane] >> 4)  - dm2;
 
-                acc += w_lo * __half2float(x[k_lo]);
-                acc += w_hi * __half2float(x[k_hi]);
-            }
+            acc += w_lo * __half2float(x[k_lo]);
+            acc += w_hi * __half2float(x[k_hi]);
         }
     }
 
@@ -159,7 +162,7 @@ __global__ void gemv_q5k_kernel(
 
     float acc = 0.0f;
 
-    for (int b = lane; b < n_blocks; b += 32) {
+    for (int b = 0; b < n_blocks; b++) {
         const block_q5_K& blk = row_blocks[b];
 
         const float dall = raw_fp16_to_float(blk.d_raw);
@@ -182,16 +185,14 @@ __global__ void gemv_q5k_kernel(
             const uint8_t* ql = blk.qs + 32 * il;
             const uint8_t* qh = blk.qh;
 
-            for (int l = 0; l < 32; l++) {
-                const int k_lo = k_base + 64 * il + l;
-                const int k_hi = k_lo + 32;
+            const int k_lo = k_base + 64 * il + lane;
+            const int k_hi = k_lo + 32;
 
-                const float w_lo = d1 * ((ql[l] & 0xF) + ((qh[l] & u1) ? 16 : 0)) - dm1;
-                const float w_hi = d2 * ((ql[l] >> 4)  + ((qh[l] & u2) ? 16 : 0)) - dm2;
+            const float w_lo = d1 * ((ql[lane] & 0xF) + ((qh[lane] & u1) ? 16 : 0)) - dm1;
+            const float w_hi = d2 * ((ql[lane] >> 4)  + ((qh[lane] & u2) ? 16 : 0)) - dm2;
 
-                acc += w_lo * __half2float(x[k_lo]);
-                acc += w_hi * __half2float(x[k_hi]);
-            }
+            acc += w_lo * __half2float(x[k_lo]);
+            acc += w_hi * __half2float(x[k_hi]);
 
             u1 <<= 2;
             u2 <<= 2;
@@ -221,32 +222,27 @@ __global__ void gemv_q6k_kernel(
 
     float acc = 0.0f;
 
-    for (int b = lane; b < n_blocks; b += 32) {
+    for (int b = 0; b < n_blocks; b++) {
         const block_q6_K& blk = row_blocks[b];
         const float d = raw_fp16_to_float(blk.d_raw);
         const int k_base = b * QK_K;
 
-        const uint8_t* ql = blk.ql;
-        const uint8_t* qh = blk.qh;
-        const int8_t*  sc = blk.scales;
-
         for (int n = 0; n < QK_K; n += 128) {
-            for (int l = 0; l < 32; l++) {
-                const int is = l / 16;
-                const int q1 = (int)((ql[l +  0] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
-                const int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
-                const int q3 = (int)((ql[l +  0] >>  4) | (((qh[l] >> 4) & 3) << 4)) - 32;
-                const int q4 = (int)((ql[l + 32] >>  4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+            const uint8_t* ql = blk.ql + (n / 128) * 64;
+            const uint8_t* qh = blk.qh + (n / 128) * 32;
+            const int8_t*  sc = blk.scales + (n / 128) * 8;
+            const int is = lane / 16;
 
-                const int k0 = k_base + n + l;
-                acc += d * (float)sc[is + 0] * (float)q1 * __half2float(x[k0 +  0]);
-                acc += d * (float)sc[is + 2] * (float)q2 * __half2float(x[k0 + 32]);
-                acc += d * (float)sc[is + 4] * (float)q3 * __half2float(x[k0 + 64]);
-                acc += d * (float)sc[is + 6] * (float)q4 * __half2float(x[k0 + 96]);
-            }
-            ql += 64;
-            qh += 32;
-            sc += 8;
+            const int q1 = (int)((ql[lane +  0] & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
+            const int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
+            const int q3 = (int)((ql[lane +  0] >>  4) | (((qh[lane] >> 4) & 3) << 4)) - 32;
+            const int q4 = (int)((ql[lane + 32] >>  4) | (((qh[lane] >> 6) & 3) << 4)) - 32;
+
+            const int k0 = k_base + n + lane;
+            acc += d * (float)sc[is + 0] * (float)q1 * __half2float(x[k0 +  0]);
+            acc += d * (float)sc[is + 2] * (float)q2 * __half2float(x[k0 + 32]);
+            acc += d * (float)sc[is + 4] * (float)q3 * __half2float(x[k0 + 64]);
+            acc += d * (float)sc[is + 6] * (float)q4 * __half2float(x[k0 + 96]);
         }
     }
 

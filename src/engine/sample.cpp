@@ -1,7 +1,7 @@
 // sample.cpp — Token sampling (top-k, top-p, temperature)
 //
-// Runs on CPU — logits are small (vocab_size floats) and sampling
-// has branchy control flow that GPUs handle poorly.
+// Runs on CPU. The default path keeps only top-k logits before softmax so
+// large Qwen vocabularies do not pay full-vocab exp() and allocation costs.
 
 #include "jllm_engine.h"
 #include <algorithm>
@@ -32,10 +32,20 @@ static bool debug_kernels_enabled() {
     return enabled;
 }
 
+static bool fast_sample_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_SAMPLE");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 struct TokenProb {
     int   id;
     float prob;
 };
+
+static int sample_greedy(const float* logits, int n);
 
 // Apply temperature scaling
 static void apply_temperature(float* logits, int n, float temperature) {
@@ -58,7 +68,7 @@ static void apply_repeat_penalty(float* logits, const int* recent_tokens,
 
 // Top-K: keep only the K highest logits
 static int top_k_filter(TokenProb* candidates, int n, int k) {
-    if (k >= n) return n;
+    if (k <= 0 || k >= n) return n;
     std::partial_sort(candidates, candidates + k, candidates + n,
                       [](const TokenProb& a, const TokenProb& b) {
                           return a.prob > b.prob;
@@ -96,6 +106,54 @@ static int sample_from(const TokenProb* candidates, int n) {
         if (cumsum >= r) return candidates[i].id;
     }
     return candidates[n - 1].id;
+}
+
+static int sample_top_k_fast(const float* logits, int vocab_size,
+                             const GenParams& params) {
+    int k = params.top_k;
+    if (k <= 0 || k >= vocab_size) return -1;
+
+    const float inv_t = (params.temperature == 1.0f) ? 1.0f : 1.0f / params.temperature;
+    std::vector<TokenProb> candidates;
+    candidates.reserve(k);
+
+    auto min_heap = [](const TokenProb& a, const TokenProb& b) {
+        return a.prob > b.prob;
+    };
+
+    for (int i = 0; i < vocab_size; i++) {
+        if (!finite_bits(logits[i])) continue;
+        const float v = logits[i] * inv_t;
+        if ((int)candidates.size() < k) {
+            candidates.push_back({i, v});
+            std::push_heap(candidates.begin(), candidates.end(), min_heap);
+        } else if (v > candidates.front().prob) {
+            std::pop_heap(candidates.begin(), candidates.end(), min_heap);
+            candidates.back() = {i, v};
+            std::push_heap(candidates.begin(), candidates.end(), min_heap);
+        }
+    }
+
+    if (candidates.empty()) return sample_greedy(logits, vocab_size);
+
+    std::sort(candidates.begin(), candidates.end(),
+              [](const TokenProb& a, const TokenProb& b) {
+                  return a.prob > b.prob;
+              });
+
+    const float max_val = candidates.front().prob;
+    float sum = 0.0f;
+    for (auto& c : candidates) {
+        c.prob = expf(c.prob - max_val);
+        sum += c.prob;
+    }
+    if (!finite_bits(sum) || sum <= 0.0f) return sample_greedy(logits, vocab_size);
+
+    const float inv_sum = 1.0f / sum;
+    for (auto& c : candidates) c.prob *= inv_sum;
+
+    int n = top_p_filter(candidates.data(), (int)candidates.size(), params.top_p);
+    return sample_from(candidates.data(), n);
 }
 
 // Greedy: just pick the highest logit
@@ -158,6 +216,14 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
 
     // Apply penalties
     apply_repeat_penalty(logits, recent_tokens, n_recent, params.repeat_penalty);
+
+    // Default decoding uses small top-k. Avoid full-vocab exp() and a
+    // vocab-sized candidate allocation on every token.
+    if (fast_sample_enabled()) {
+        int fast_token = sample_top_k_fast(logits, vocab_size, params);
+        if (fast_token >= 0) return fast_token;
+    }
+
     apply_temperature(logits, vocab_size, params.temperature);
 
     // Softmax (on CPU — small array)

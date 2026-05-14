@@ -226,9 +226,11 @@ For each prompt token, *prefill*:
 Then for each output token, *decode*:
 1. Same as above for one token.
 2. Final `output_norm` RMSNorm.
-3. `gemv_quant_f32(logits_fp32, output, output_type, normed, vocab_size, hidden_dim)`
-   — multiplies the final normed hidden state by the tied embedding
-   matrix to get 151,936 FP32 logits.
+3. `gemv_quant(logits_fp16, output, output_type, normed, vocab_size, hidden_dim)`,
+   then `fp16_to_fp32(logits_fp32, logits_fp16, vocab_size)`.
+   This multiplies the final normed hidden state by the tied embedding
+   matrix to get 151,936 logits without allocating a temporary CUDA buffer
+   per token.
 4. Sample (top-k / top-p / temperature).
 5. Append to `recent_tokens_`, set `last_token_`, loop.
 

@@ -265,6 +265,11 @@ void Engine::unload() {
     if (decode_graph_exec_) { cudaGraphExecDestroy(decode_graph_exec_); decode_graph_exec_ = nullptr; }
     if (decode_graph_)      { cudaGraphDestroy(decode_graph_); decode_graph_ = nullptr; }
     if (stream_)            { cudaStreamDestroy(stream_); stream_ = nullptr; }
+    if (host_logits_) {
+        cudaFreeHost(host_logits_);
+        host_logits_ = nullptr;
+        host_logits_capacity_ = 0;
+    }
     for (void* p : device_weight_copies_) cudaFree(p);
     device_weight_copies_.clear();
     kv_cache_.destroy();
@@ -434,6 +439,15 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     cudaStreamCreate(&stream_);
     tokenizer_.load_from_gguf(gguf_path);
 
+    cudaError_t logits_err = cudaMallocHost((void**)&host_logits_,
+                                            config_.vocab_size * sizeof(float));
+    if (logits_err != cudaSuccess) {
+        fprintf(stderr, "[engine] cudaMallocHost logits buffer failed: %s\n",
+                cudaGetErrorString(logits_err));
+        return false;
+    }
+    host_logits_capacity_ = config_.vocab_size;
+
     budget_.print();
     loaded_ = true;
     return true;
@@ -594,26 +608,36 @@ int Engine::decode_step(int pos) {
     half* normed = (half*)scratch_.get(H * sizeof(half));
     fused_rmsnorm_residual(normed, x, nullptr, model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
-    // Logits: reference FP32 GEMV while quantized CUDA matvec is being validated.
+    // Logits: reuse scratch for the FP16 projection and FP32 conversion. This
+    // avoids a cudaMalloc/cudaFree pair in the decode loop for every token.
+    half* logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
 
-    if (!logits_fp32) {
+    if (!logits_fp16 || !logits_fp32 || !host_logits_ ||
+        host_logits_capacity_ < config_.vocab_size) {
         fprintf(stderr, "[decode] FATAL: failed to allocate logits buffer\n");
         return tokenizer_.eos_id;
     }
 
-    gemv_quant_f32(logits_fp32, model_weights_.output, model_weights_.output_type,
-                   normed, config_.vocab_size, H, stream_);
+    gemv_quant(logits_fp16, model_weights_.output, model_weights_.output_type,
+               normed, config_.vocab_size, H, stream_);
+    fp16_to_fp32(logits_fp32, logits_fp16, config_.vocab_size, stream_);
 
-    cudaStreamSynchronize(stream_);
-
-    // Copy FP32 logits to CPU for sampling
-    std::vector<float> h_logits(config_.vocab_size);
-    cudaMemcpy(h_logits.data(), logits_fp32,
-               config_.vocab_size * sizeof(float), cudaMemcpyDeviceToHost);
+    // Copy FP32 logits to a pinned host buffer for CPU sampling.
+    cudaError_t copy_err = cudaMemcpyAsync(host_logits_, logits_fp32,
+                                           config_.vocab_size * sizeof(float),
+                                           cudaMemcpyDeviceToHost, stream_);
+    if (copy_err == cudaSuccess) {
+        copy_err = cudaStreamSynchronize(stream_);
+    }
+    if (copy_err != cudaSuccess) {
+        fprintf(stderr, "[decode] FATAL: logits copy failed: %s\n",
+                cudaGetErrorString(copy_err));
+        return tokenizer_.eos_id;
+    }
 
     // Sample
-    int token = sample_token(h_logits.data(), config_.vocab_size, gen_params_,
+    int token = sample_token(host_logits_, config_.vocab_size, gen_params_,
                              recent_tokens_.data(), recent_tokens_.size());
 
     recent_tokens_.push_back(token);
@@ -652,10 +676,12 @@ void Engine::build_cuda_graph(int pos) {
     fused_rmsnorm_residual(g_normed, graph_x, nullptr,
                           model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
-    // Capture logit projection.
+    // Capture logit projection without per-token cudaMalloc/cudaFree.
+    half* g_logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
     float* g_logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
-    gemv_quant_f32(g_logits_fp32, model_weights_.output, model_weights_.output_type,
-                   g_normed, config_.vocab_size, H, stream_);
+    gemv_quant(g_logits_fp16, model_weights_.output, model_weights_.output_type,
+               g_normed, config_.vocab_size, H, stream_);
+    fp16_to_fp32(g_logits_fp32, g_logits_fp16, config_.vocab_size, stream_);
 
     cudaError_t err = cudaStreamEndCapture(stream_, &decode_graph_);
     if (err != cudaSuccess) {
