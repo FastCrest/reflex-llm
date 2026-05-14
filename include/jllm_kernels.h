@@ -71,6 +71,41 @@ void gemv_quant(
     cudaStream_t   stream
 );
 
+// Combined K-quant GEMV dispatchers for projections that share the same
+// activation vector. These reduce decode launch overhead for Q/K/V and
+// gate/up without changing math.
+void gemv_quant_pair(
+    half*          y0,
+    const void*    W0,
+    int            ggml_type0,
+    int            M0,
+    half*          y1,
+    const void*    W1,
+    int            ggml_type1,
+    int            M1,
+    const half*    x,
+    int            K,
+    cudaStream_t   stream
+);
+
+void gemv_quant_triple(
+    half*          y0,
+    const void*    W0,
+    int            ggml_type0,
+    int            M0,
+    half*          y1,
+    const void*    W1,
+    int            ggml_type1,
+    int            M1,
+    half*          y2,
+    const void*    W2,
+    int            ggml_type2,
+    int            M2,
+    const half*    x,
+    int            K,
+    cudaStream_t   stream
+);
+
 // CPU reference K-quant GEMV that writes FP32 output. Used for logits while
 // the quantized CUDA path is being brought up.
 void gemv_quant_f32(

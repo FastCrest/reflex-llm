@@ -173,6 +173,24 @@ static int sample_greedy(const float* logits, int n) {
 
 int sample_token(float* logits, int vocab_size, const GenParams& params,
                  const int* recent_tokens, int n_recent) {
+    const bool debug = debug_kernels_enabled();
+    bool penalty_applied = false;
+
+    // Fast non-debug path. Avoid an extra full-vocab validation/min/max pass
+    // before top-k sampling; sample_top_k_fast() already skips non-finite
+    // logits while scanning for the best K candidates.
+    if (!debug) {
+        if (params.temperature <= 0.0f)
+            return sample_greedy(logits, vocab_size);
+
+        apply_repeat_penalty(logits, recent_tokens, n_recent, params.repeat_penalty);
+        penalty_applied = true;
+        if (fast_sample_enabled()) {
+            int fast_token = sample_top_k_fast(logits, vocab_size, params);
+            if (fast_token >= 0) return fast_token;
+        }
+    }
+
     int invalid = 0;
     float min_val = FLT_MAX;
     float max_val_raw = -FLT_MAX;
@@ -186,7 +204,7 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
         }
     }
 
-    if (debug_kernels_enabled()) {
+    if (debug) {
         int best[5] = {0, 0, 0, 0, 0};
         float vals[5] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY, -INFINITY};
         for (int i = 0; i < vocab_size; i++) {
@@ -215,7 +233,8 @@ int sample_token(float* logits, int vocab_size, const GenParams& params,
         return sample_greedy(logits, vocab_size);
 
     // Apply penalties
-    apply_repeat_penalty(logits, recent_tokens, n_recent, params.repeat_penalty);
+    if (!penalty_applied)
+        apply_repeat_penalty(logits, recent_tokens, n_recent, params.repeat_penalty);
 
     // Default decoding uses small top-k. Avoid full-vocab exp() and a
     // vocab-sized candidate allocation on every token.

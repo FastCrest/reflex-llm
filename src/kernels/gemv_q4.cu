@@ -28,6 +28,41 @@ static bool fast_gemv_enabled() {
     return enabled;
 }
 
+static const void* resolve_weight_device_ptr(const void* W) {
+    if (const void* mapped = resolve_mapped_weight_device_ptr(W)) {
+        return mapped;
+    }
+
+    cudaPointerAttributes attr{};
+    cudaError_t err = cudaPointerGetAttributes(&attr, W);
+    if (err != cudaSuccess) {
+        cudaGetLastError();  // clear the sticky error for ordinary host pointers
+        return nullptr;
+    }
+
+#if CUDART_VERSION >= 10000
+    if (attr.type == cudaMemoryTypeDevice || attr.type == cudaMemoryTypeManaged) {
+        return W;
+    }
+#else
+    if (attr.memoryType == cudaMemoryTypeDevice) {
+        return W;
+    }
+#endif
+
+    return nullptr;
+}
+
+static int gemv_rows_per_block() {
+    static const int rows = [] {
+        const char* v = getenv("JLLM_GEMV_ROWS");
+        int r = v ? atoi(v) : 8;
+        if (r != 4 && r != 8) r = 8;
+        return r;
+    }();
+    return rows;
+}
+
 // Use raw uint16 instead of half2 to guarantee no padding
 struct __attribute__((packed)) block_q4_K {
     uint16_t d_raw;       // FP16 super-block scale
@@ -85,81 +120,54 @@ __host__ __device__ __forceinline__ void get_scale_min_k4(
     }
 }
 
-__global__ void gemv_q4k_kernel(
-    half*              __restrict__ y,
-    const block_q4_K*  __restrict__ W,
-    const half*        __restrict__ x,
-    int M, int K)
+__device__ __forceinline__ float dot_q4k_row(
+    const block_q4_K* __restrict__ row_blocks,
+    const half*       __restrict__ x,
+    int n_blocks,
+    int lane)
 {
-    const int row  = blockIdx.x * 4 + threadIdx.x / 32;
-    const int lane = threadIdx.x & 31;
-    if (row >= M) return;
-
-    const int n_blocks = K / QK_K;
-    const block_q4_K* row_blocks = W + (int64_t)row * n_blocks;
-
     float acc = 0.0f;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q4_K& blk = row_blocks[b];
 
-        float dall = raw_fp16_to_float(blk.d_raw);
-        float dmin = raw_fp16_to_float(blk.dmin_raw);
+        const float dall = raw_fp16_to_float(blk.d_raw);
+        const float dmin = raw_fp16_to_float(blk.dmin_raw);
+        const int k_base = b * QK_K;
 
-        int k_base = b * QK_K;
-
-        // Use all 32 lanes for each 256-value K-quant block. The previous
-        // lane-per-block mapping left most of the warp idle for Qwen's
-        // K=2560 projections (10 blocks), including the large tied output
-        // projection. Each lane handles one byte from each 32-byte quant
-        // group and accumulates eight weights per block.
         for (int il = 0; il < 4; il++) {
-            int is = 2 * il;
+            const int is = 2 * il;
 
             uint8_t sc1, m1, sc2, m2;
             get_scale_min_k4(is + 0, blk.scales, sc1, m1);
             get_scale_min_k4(is + 1, blk.scales, sc2, m2);
 
-            float d1 = dall * sc1;
-            float dm1 = dmin * m1;
-            float d2 = dall * sc2;
-            float dm2 = dmin * m2;
+            const float d1 = dall * sc1;
+            const float dm1 = dmin * m1;
+            const float d2 = dall * sc2;
+            const float dm2 = dmin * m2;
 
             const uint8_t* q = blk.qs + 32 * il;
+            const int k_lo = k_base + 64 * il + lane;
+            const int k_hi = k_lo + 32;
 
-            int k_lo = k_base + 64 * il + lane;
-            int k_hi = k_lo + 32;
-
-            float w_lo = d1 * (q[lane] & 0xF) - dm1;
-            float w_hi = d2 * (q[lane] >> 4)  - dm2;
+            const float w_lo = d1 * (q[lane] & 0xF) - dm1;
+            const float w_hi = d2 * (q[lane] >> 4)  - dm2;
 
             acc += w_lo * __half2float(x[k_lo]);
             acc += w_hi * __half2float(x[k_hi]);
         }
     }
 
-    // Warp reduce
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_xor_sync(0xFFFFFFFF, acc, off);
-
-    if (lane == 0)
-        y[row] = __float2half(acc);
+    return acc;
 }
 
-__global__ void gemv_q5k_kernel(
-    half*              __restrict__ y,
-    const block_q5_K*  __restrict__ W,
-    const half*        __restrict__ x,
-    int M, int K)
+__device__ __forceinline__ float dot_q5k_row(
+    const block_q5_K* __restrict__ row_blocks,
+    const half*       __restrict__ x,
+    int n_blocks,
+    int lane)
 {
-    const int row  = blockIdx.x * 4 + threadIdx.x / 32;
-    const int lane = threadIdx.x & 31;
-    if (row >= M) return;
-
-    const int n_blocks = K / QK_K;
-    const block_q5_K* row_blocks = W + (int64_t)row * n_blocks;
-
     float acc = 0.0f;
 
     for (int b = 0; b < n_blocks; b++) {
@@ -184,7 +192,6 @@ __global__ void gemv_q5k_kernel(
 
             const uint8_t* ql = blk.qs + 32 * il;
             const uint8_t* qh = blk.qh;
-
             const int k_lo = k_base + 64 * il + lane;
             const int k_hi = k_lo + 32;
 
@@ -199,27 +206,15 @@ __global__ void gemv_q5k_kernel(
         }
     }
 
-    #pragma unroll
-    for (int off = 16; off > 0; off >>= 1)
-        acc += __shfl_xor_sync(0xFFFFFFFF, acc, off);
-
-    if (lane == 0)
-        y[row] = __float2half(acc);
+    return acc;
 }
 
-__global__ void gemv_q6k_kernel(
-    half*              __restrict__ y,
-    const block_q6_K*  __restrict__ W,
-    const half*        __restrict__ x,
-    int M, int K)
+__device__ __forceinline__ float dot_q6k_row(
+    const block_q6_K* __restrict__ row_blocks,
+    const half*       __restrict__ x,
+    int n_blocks,
+    int lane)
 {
-    const int row  = blockIdx.x * 4 + threadIdx.x / 32;
-    const int lane = threadIdx.x & 31;
-    if (row >= M) return;
-
-    const int n_blocks = K / QK_K;
-    const block_q6_K* row_blocks = W + (int64_t)row * n_blocks;
-
     float acc = 0.0f;
 
     for (int b = 0; b < n_blocks; b++) {
@@ -246,12 +241,182 @@ __global__ void gemv_q6k_kernel(
         }
     }
 
+    return acc;
+}
+
+__device__ __forceinline__ float dot_quant_row(
+    const void* __restrict__ W,
+    int ggml_type,
+    int row,
+    int n_blocks,
+    const half* __restrict__ x,
+    int lane)
+{
+    switch (ggml_type) {
+        case 12:
+            return dot_q4k_row((const block_q4_K*)W + (int64_t)row * n_blocks,
+                               x, n_blocks, lane);
+        case 13:
+            return dot_q5k_row((const block_q5_K*)W + (int64_t)row * n_blocks,
+                               x, n_blocks, lane);
+        case 14:
+            return dot_q6k_row((const block_q6_K*)W + (int64_t)row * n_blocks,
+                               x, n_blocks, lane);
+        default:
+            return 0.0f;
+    }
+}
+
+__device__ __forceinline__ float warp_reduce_sum(float acc) {
     #pragma unroll
     for (int off = 16; off > 0; off >>= 1)
         acc += __shfl_xor_sync(0xFFFFFFFF, acc, off);
+    return acc;
+}
+
+__global__ void gemv_q4k_kernel(
+    half*              __restrict__ y,
+    const block_q4_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q4k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
 
     if (lane == 0)
         y[row] = __float2half(acc);
+}
+
+__global__ void gemv_q5k_kernel(
+    half*              __restrict__ y,
+    const block_q5_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q5k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
+
+    if (lane == 0)
+        y[row] = __float2half(acc);
+}
+
+__global__ void gemv_q6k_kernel(
+    half*              __restrict__ y,
+    const block_q6_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q6k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
+
+    if (lane == 0)
+        y[row] = __float2half(acc);
+}
+
+__global__ void gemv_quant_pair_kernel(
+    half*        __restrict__ y0,
+    const void*  __restrict__ W0,
+    int type0,
+    int M0,
+    half*        __restrict__ y1,
+    const void*  __restrict__ W1,
+    int type1,
+    int M1,
+    const half*  __restrict__ x,
+    int K,
+    int rows_per_block)
+{
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int total_M = M0 + M1;
+    if (row >= total_M) return;
+
+    const int n_blocks = K / QK_K;
+    half* y = nullptr;
+    const void* W = nullptr;
+    int type = 0;
+    int local_row = row;
+
+    if (row < M0) {
+        y = y0;
+        W = W0;
+        type = type0;
+    } else {
+        y = y1;
+        W = W1;
+        type = type1;
+        local_row = row - M0;
+    }
+
+    float acc = dot_quant_row(W, type, local_row, n_blocks, x, lane);
+    acc = warp_reduce_sum(acc);
+    if (lane == 0)
+        y[local_row] = __float2half(acc);
+}
+
+__global__ void gemv_quant_triple_kernel(
+    half*        __restrict__ y0,
+    const void*  __restrict__ W0,
+    int type0,
+    int M0,
+    half*        __restrict__ y1,
+    const void*  __restrict__ W1,
+    int type1,
+    int M1,
+    half*        __restrict__ y2,
+    const void*  __restrict__ W2,
+    int type2,
+    int M2,
+    const half*  __restrict__ x,
+    int K,
+    int rows_per_block)
+{
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int total_M = M0 + M1 + M2;
+    if (row >= total_M) return;
+
+    const int n_blocks = K / QK_K;
+    half* y = nullptr;
+    const void* W = nullptr;
+    int type = 0;
+    int local_row = row;
+
+    if (row < M0) {
+        y = y0;
+        W = W0;
+        type = type0;
+    } else if (row < M0 + M1) {
+        y = y1;
+        W = W1;
+        type = type1;
+        local_row = row - M0;
+    } else {
+        y = y2;
+        W = W2;
+        type = type2;
+        local_row = row - M0 - M1;
+    }
+
+    float acc = dot_quant_row(W, type, local_row, n_blocks, x, lane);
+    acc = warp_reduce_sum(acc);
+    if (lane == 0)
+        y[local_row] = __float2half(acc);
 }
 
 // Debug kernel: print first few output values
@@ -273,7 +438,7 @@ void gemv_q4(half* y, const void* W_q4, const half* scales, const half* x,
 
 static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
                            const half* x, int M, int K, cudaStream_t stream) {
-    const void* W_device = resolve_mapped_weight_device_ptr(W);
+    const void* W_device = resolve_weight_device_ptr(W);
     if (!W_device) {
         static bool warned = false;
         if (!warned) {
@@ -285,21 +450,22 @@ static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
         return false;
     }
 
-    const int block = 128;
-    const int grid = (M + 3) / 4;
+    const int rows_per_block = gemv_rows_per_block();
+    const int block = rows_per_block * 32;
+    const int grid = (M + rows_per_block - 1) / rows_per_block;
 
     switch (ggml_type) {
         case 12:
             gemv_q4k_kernel<<<grid, block, 0, stream>>>(
-                y, (const block_q4_K*)W_device, x, M, K);
+                y, (const block_q4_K*)W_device, x, M, K, rows_per_block);
             break;
         case 13:
             gemv_q5k_kernel<<<grid, block, 0, stream>>>(
-                y, (const block_q5_K*)W_device, x, M, K);
+                y, (const block_q5_K*)W_device, x, M, K, rows_per_block);
             break;
         case 14:
             gemv_q6k_kernel<<<grid, block, 0, stream>>>(
-                y, (const block_q6_K*)W_device, x, M, K);
+                y, (const block_q6_K*)W_device, x, M, K, rows_per_block);
             break;
         default:
             fprintf(stderr, "[GEMV] FATAL: unsupported GPU GGML type %d (M=%d K=%d)\n",
@@ -310,6 +476,72 @@ static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "[GEMV] GPU launch failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+static bool supported_gpu_type(int ggml_type) {
+    return ggml_type == 12 || ggml_type == 13 || ggml_type == 14;
+}
+
+static bool gemv_quant_pair_gpu(
+    half* y0, const void* W0, int type0, int M0,
+    half* y1, const void* W1, int type1, int M1,
+    const half* x, int K, cudaStream_t stream)
+{
+    const void* W0_device = resolve_weight_device_ptr(W0);
+    const void* W1_device = resolve_weight_device_ptr(W1);
+    if (!W0_device || !W1_device ||
+        !supported_gpu_type(type0) || !supported_gpu_type(type1)) {
+        return false;
+    }
+
+    const int rows_per_block = gemv_rows_per_block();
+    const int block = rows_per_block * 32;
+    const int grid = (M0 + M1 + rows_per_block - 1) / rows_per_block;
+
+    gemv_quant_pair_kernel<<<grid, block, 0, stream>>>(
+        y0, W0_device, type0, M0,
+        y1, W1_device, type1, M1,
+        x, K, rows_per_block);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GEMV] pair GPU launch failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+static bool gemv_quant_triple_gpu(
+    half* y0, const void* W0, int type0, int M0,
+    half* y1, const void* W1, int type1, int M1,
+    half* y2, const void* W2, int type2, int M2,
+    const half* x, int K, cudaStream_t stream)
+{
+    const void* W0_device = resolve_weight_device_ptr(W0);
+    const void* W1_device = resolve_weight_device_ptr(W1);
+    const void* W2_device = resolve_weight_device_ptr(W2);
+    if (!W0_device || !W1_device || !W2_device ||
+        !supported_gpu_type(type0) || !supported_gpu_type(type1) ||
+        !supported_gpu_type(type2)) {
+        return false;
+    }
+
+    const int rows_per_block = gemv_rows_per_block();
+    const int block = rows_per_block * 32;
+    const int grid = (M0 + M1 + M2 + rows_per_block - 1) / rows_per_block;
+
+    gemv_quant_triple_kernel<<<grid, block, 0, stream>>>(
+        y0, W0_device, type0, M0,
+        y1, W1_device, type1, M1,
+        y2, W2_device, type2, M2,
+        x, K, rows_per_block);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GEMV] triple GPU launch failed: %s\n", cudaGetErrorString(err));
         return false;
     }
     return true;
@@ -489,6 +721,41 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
         fprintf(stderr, "\n");
         dbg_count++;
     }
+}
+
+void gemv_quant_pair(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    const half* x, int K, cudaStream_t stream)
+{
+    if (fast_gemv_enabled() &&
+        gemv_quant_pair_gpu(y0, W0, ggml_type0, M0,
+                            y1, W1, ggml_type1, M1,
+                            x, K, stream)) {
+        return;
+    }
+
+    gemv_quant(y0, W0, ggml_type0, x, M0, K, stream);
+    gemv_quant(y1, W1, ggml_type1, x, M1, K, stream);
+}
+
+void gemv_quant_triple(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    half* y2, const void* W2, int ggml_type2, int M2,
+    const half* x, int K, cudaStream_t stream)
+{
+    if (fast_gemv_enabled() &&
+        gemv_quant_triple_gpu(y0, W0, ggml_type0, M0,
+                              y1, W1, ggml_type1, M1,
+                              y2, W2, ggml_type2, M2,
+                              x, K, stream)) {
+        return;
+    }
+
+    gemv_quant(y0, W0, ggml_type0, x, M0, K, stream);
+    gemv_quant(y1, W1, ggml_type1, x, M1, K, stream);
+    gemv_quant(y2, W2, ggml_type2, x, M2, K, stream);
 }
 
 void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,

@@ -358,6 +358,72 @@ static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
     return true;
 }
 
+static bool device_output_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_DEVICE_OUTPUT");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
+static size_t kquant_tensor_bytes(int ggml_type, int rows, int cols) {
+    if (rows <= 0 || cols <= 0 || cols % 256 != 0) return 0;
+
+    size_t block_bytes = 0;
+    switch (ggml_type) {
+        case 12: block_bytes = 144; break;  // Q4_K
+        case 13: block_bytes = 176; break;  // Q5_K
+        case 14: block_bytes = 210; break;  // Q6_K
+        default: return 0;
+    }
+
+    return (size_t)rows * (size_t)(cols / 256) * block_bytes;
+}
+
+static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg,
+                                        const MemoryBudget& budget,
+                                        std::vector<void*>& owned) {
+    if (!device_output_enabled() || !mw.output) return 0;
+
+    const size_t bytes = kquant_tensor_bytes(mw.output_type,
+                                             cfg.vocab_size,
+                                             cfg.hidden_dim);
+    if (bytes == 0) return 0;
+
+    const int64_t mb = (int64_t)((bytes + 1024 * 1024 - 1) / (1024 * 1024));
+    if (budget.free_mb() < mb + 128) {
+        fprintf(stderr,
+                "[model] device output copy skipped (%ld MB requested, %ld MB free budget)\n",
+                mb, budget.free_mb());
+        return 0;
+    }
+
+    void* output_device = nullptr;
+    cudaError_t err = cudaMalloc(&output_device, bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "[model] device output copy skipped (%zu MB): %s\n",
+                bytes / (1024 * 1024), cudaGetErrorString(err));
+        return 0;
+    }
+
+    err = cudaMemcpy(output_device, mw.output, bytes, cudaMemcpyHostToDevice);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "[model] device output copy failed (%zu MB): %s\n",
+                bytes / (1024 * 1024), cudaGetErrorString(err));
+        cudaFree(output_device);
+        return 0;
+    }
+
+    owned.push_back(output_device);
+    mw.output = output_device;
+    fprintf(stderr,
+            "[model] Materialized output projection on device (%zu MB)\n",
+            bytes / (1024 * 1024));
+    return bytes;
+}
+
 bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     gen_params_ = params;
     budget_ = probe_system_memory();
@@ -435,6 +501,11 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
 
     if (!scratch_.init(scratch_bytes)) return false;
     budget_.scratch_mb = scratch_bytes / (1024 * 1024);
+
+    const size_t output_device_bytes =
+        materialize_output_weight(model_weights_, config_, budget_,
+                                  device_weight_copies_);
+    budget_.model_mb += output_device_bytes / (1024 * 1024);
 
     cudaStreamCreate(&stream_);
     tokenizer_.load_from_gguf(gguf_path);
@@ -525,10 +596,12 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
         fprintf(stderr, "\n");
     }
 
-    // 2. QKV projections
-    gemv_quant(q_buf, lw.wq, lw.type_wq, normed, Q_DIM, H, stream_);
-    gemv_quant(k_buf, lw.wk, lw.type_wk, normed, KV_DIM, H, stream_);
-    gemv_quant(v_buf, lw.wv, lw.type_wv, normed, KV_DIM, H, stream_);
+    // 2. QKV projections. These share the same input vector, so dispatch as
+    // one combined GEMV launch when the fast K-quant path is available.
+    gemv_quant_triple(q_buf, lw.wq, lw.type_wq, Q_DIM,
+                      k_buf, lw.wk, lw.type_wk, KV_DIM,
+                      v_buf, lw.wv, lw.type_wv, KV_DIM,
+                      normed, H, stream_);
 
     if (lw.q_norm && lw.k_norm) {
         fused_rmsnorm_residual(q_buf, q_buf, nullptr, lw.q_norm,
@@ -573,9 +646,10 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     // 8. Pre-FFN RMSNorm: normed2 = RMSNorm(x2) * weight
     fused_rmsnorm_residual(normed2, x2, nullptr, lw.rms_ffn, 1, H, config_.rms_eps, norm_fp32, stream_);
 
-    // 9. Gate and up projections
-    gemv_quant(gate_buf, lw.w_gate, lw.type_w_gate, normed2, I, H, stream_);
-    gemv_quant(up_buf,   lw.w_up,   lw.type_w_up,   normed2, I, H, stream_);
+    // 9. Gate and up projections share the same input vector.
+    gemv_quant_pair(gate_buf, lw.w_gate, lw.type_w_gate, I,
+                    up_buf,   lw.w_up,   lw.type_w_up,   I,
+                    normed2, H, stream_);
 
     // 10. SwiGLU
     fused_swiglu(swiglu_out, gate_buf, up_buf, 1, I, stream_);
