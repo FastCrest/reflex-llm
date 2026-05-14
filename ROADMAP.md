@@ -1,10 +1,37 @@
 # jetson-llm Roadmap
 
-## Current State: v0.1-alpha (code-complete, needs hardware testing)
+## Current State: v0.1-alpha.2 (Week 1 validated on Jetson)
 
 ```
-4,500+ lines | 31 files | 0 known bugs | builds clean on Jetson Orin Nano Super
+Jetson Orin Nano Super 8 GB | L4T 36.4 | CUDA 12.6 | Qwen3-4B-Q4_K_M.gguf
 ```
+
+Validated on hardware:
+
+- Coherent Qwen3 instruct generation from a real GGUF model.
+- Default CUDA decode paths for K-quant GEMV, RMSNorm, and single-token attention.
+- Qwen3 model support: BPE merges, special tokens, chat template with no-think default,
+  128-dim attention heads, Q/K RMSNorm, NeoX RoPE, tied output embeddings.
+- L4T R36 power reporting: 25 W mode and GPU frequency reported correctly.
+
+Current measured smoke test:
+
+| Item | Result |
+|------|--------|
+| Model | `Qwen3-4B-Q4_K_M.gguf` |
+| Command | `./build/jetson-llm -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf -p "Hello, this is testing." -n 64 -v` |
+| Output | `Hello! It seems like you're testing the system. How can I assist you today?` |
+| Prompt | 18 tokens, 12.377 s, 1.5 tok/s |
+| Decode | 19 tokens, 13.109 s, 1.4 tok/s |
+| Memory | 3425 MB peak, 720 MB KV, 64 MB scratch |
+| Thermal | 50.0 deg C peak |
+| Power | 25 W mode, GPU locked at 918 MHz |
+
+Evidence:
+
+- Validation log: [`docs/validation-week1.md`](docs/validation-week1.md)
+- Fixed/closed: GitHub issue #1 (first coherent tokens), issue #8 (Jetson power reporting)
+- Still open: llama.cpp baseline, longer stability tests, server parity, multi-model matrix
 
 ---
 
@@ -12,22 +39,31 @@
 
 **Goal:** generate coherent text from a real GGUF model on Jetson hardware.
 
+Status: complete for Qwen3 CLI bring-up.
+
+- [x] Build on Jetson with CMake, NVCC, SM 8.7.
+- [x] Load real GGUF model: `/opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf`.
+- [x] Parse GGUF metadata, tokenizer, BPE merges, special tokens, and 398/398 tensors.
+- [x] Apply Qwen chat template by default and suppress Qwen3 thinking tokens by default.
+- [x] Generate coherent English output from CLI.
+- [x] Avoid the previous failure modes: garbage tokens, NaNs in layer 0, CUDA illegal access,
+  segfault, and all-zero/invalid logits.
+- [x] Use safe context auto-cap for 8 GB Orin Nano: 4096 tokens for Qwen3-4B in the
+  validated memory state.
+- [ ] Capture a final standalone `ctest --output-on-failure` log on the Jetson after
+  the latest CUDA default-path changes.
+
+Validated command:
+
+```bash
+./build/jetson-llm \
+  -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+  -p "Hello, this is testing." \
+  -n 64 -v
 ```
-□ Build on Jetson (cmake + nvcc SM 8.7)
-□ Run test_memory — verify budget reads /proc/meminfo correctly
-□ Run test_kernels — all 5 kernel correctness tests pass
-□ Download TinyLlama 1.1B Q4_K_M (669 MB)
-□ Run test_model_load — config, tokenizer, weight mapping all pass
-□ Run jetson-llm -m tinyllama.gguf -p "What is 2+2?" -n 32
-□ Output is coherent English (not garbage/random tokens)
-□ No segfaults, no OOM, no CUDA errors
-```
 
-**If output is garbage:** debug tensor offset mapping (model.cpp parse_tensor_infos). Use Python gguf library to verify tensor names match our patterns.
-
-**If segfault:** check null weight pointers in test_model_load output. Run with `cuda-memcheck`.
-
-**Deliverable:** screenshot of first coherent generation on Jetson.
+**Deliverable:** first coherent generation on Jetson is documented in
+[`docs/validation-week1.md`](docs/validation-week1.md).
 
 ---
 
@@ -35,29 +71,61 @@
 
 **Goal:** measure performance and compare against llama.cpp.
 
+Status: next active milestone. llama.cpp source was used as a reference during
+fixes, but a same-device llama.cpp benchmark has not been captured yet.
+
+- [ ] Build llama.cpp on the same Jetson:
+
+```bash
+cd ~
+git clone https://github.com/ggerganov/llama.cpp
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=87 -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j$(nproc)
 ```
-□ Install llama.cpp on same Jetson for baseline comparison
-    git clone https://github.com/ggerganov/llama.cpp
-    cmake -B build -DGGML_CUDA=ON && cmake --build build -j$(nproc)
 
-□ Run bench.sh with TinyLlama 1.1B — record:
-    Prompt eval: ___ tok/s
-    Decode:      ___ tok/s
-    Peak memory: ___ MB
-    Peak temp:   ___ °C
+- [ ] Run the current runtime benchmark with debug logging off:
 
-□ Run same model on llama.cpp for comparison:
-    ./llama-bench -m tinyllama.gguf -ngl 99
-
-□ Run profile.sh — identify top 3 kernel bottlenecks:
-    #1: _____ (___% of time)
-    #2: _____ (___% of time)
-    #3: _____ (___% of time)
-
-□ Graduate to Llama 3.2 3B Q4_K_M — repeat benchmarks
-□ Test context lengths: 512, 1024, 2048 — record tok/s at each
-□ Test power modes: 7W, 15W, 25W — record tok/s and tokens/joule
+```bash
+cd ~/genie-ai-runtime
+./build/jetson-llm \
+  -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+  -p "Hello, this is testing." \
+  -n 64 -v
 ```
+
+- [ ] Run the same model and comparable prompt on llama.cpp:
+
+```bash
+cd ~/llama.cpp
+./build/bin/llama-cli \
+  -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+  -p "Hello, this is testing." \
+  -n 64 -ngl 99
+
+./build/bin/llama-bench \
+  -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+  -ngl 99 -p 18 -n 64
+```
+
+- [ ] Record baseline comparison:
+
+| Runtime | Model | Prompt tok/s | Decode tok/s | Peak RAM | Peak temp | Notes |
+|---------|-------|--------------|--------------|----------|-----------|-------|
+| jetson-llm | Qwen3-4B Q4_K_M | 1.5 | 1.4 | 3425 MB | 50.0 deg C | 25 W, GPU 918 MHz, correctness smoke test |
+| llama.cpp | Qwen3-4B Q4_K_M | TBD | TBD | TBD | TBD | Same Jetson, same model |
+
+- [ ] Run profile script / Nsight Systems and identify top 3 bottlenecks:
+
+| Rank | Kernel / path | Time share | Notes |
+|------|---------------|------------|-------|
+| #1 | TBD | TBD | likely K-quant GEMV / output projection |
+| #2 | TBD | TBD | likely attention or final vocab projection |
+| #3 | TBD | TBD | likely RMSNorm / sampling / host sync |
+
+- [ ] Test context lengths: 512, 1024, 2048, 4096.
+- [ ] Test power modes: 7 W, 15 W, 25 W; record tok/s and tokens/joule.
+- [ ] Later: repeat on TinyLlama 1.1B, Llama 3.2 3B, and other Tier 1 models.
 
 **Deliverable:** performance comparison table (jetson-llm vs llama.cpp).
 
@@ -67,33 +135,27 @@
 
 **Goal:** >20% faster decode than stock llama.cpp on Llama 3.2 3B.
 
-```
-Based on profiling results from v0.2:
+Status: started early for correctness and basic acceleration. Benchmark-winning
+tuning still depends on v0.2 llama.cpp and Nsight data.
 
-□ Optimize #1 bottleneck kernel (likely gemv_q4):
-    □ Tune thread block size (try 64, 128, 256)
-    □ Tune elements per thread (try 4, 8, 16)
-    □ Add vectorized loads (float4 / int4)
-    □ Profile: register count, occupancy, memory throughput
+- [x] Map GGUF weights into CUDA-visible host memory for K-quant GEMV.
+- [x] Enable default CUDA GEMV for Q4_K, Q5_K, and Q6_K tensors.
+- [x] Enable default CUDA RMSNorm path with CPU fallback via `JLLM_FAST_NORM=0`.
+- [x] Enable default CUDA decode-attention path with CPU fallback via `JLLM_FAST_ATTN=0`.
+- [x] Keep per-kernel fallback switches:
+  `JLLM_FAST_GEMV=0`, `JLLM_FAST_NORM=0`, `JLLM_FAST_ATTN=0`.
+- [x] Remove the need for debug env vars for normal coherent output.
+- [ ] Tune GEMV block size, elements per thread, vectorized loads, and output projection.
+- [ ] Tune attention tile size and compare FP16 vs INT8 KV behavior.
+- [ ] Profile register count, occupancy, bandwidth, and host synchronization.
+- [ ] Validate CUDA graph capture/replay on the current decode loop.
+- [ ] Re-run against llama.cpp after profiling and record speedup:
 
-□ Optimize #2 bottleneck kernel (likely attention):
-    □ Tune ATTN_TILE_KV (try 32, 64, 128)
-    □ Test INT8 vs FP16 KV cache performance difference
-    □ Profile shared memory utilization
-
-□ Optimize #3 bottleneck kernel (likely fused_norm):
-    □ Verify fusion is working (compare 1-kernel vs 3-kernel time)
-    □ Try different block sizes for different hidden_dim
-
-□ Enable CUDA graphs for decode loop:
-    □ Verify graph capture works (no host-side ops inside capture)
-    □ Measure launch overhead reduction (before/after)
-
-□ Re-run bench.sh — measure improvement:
-    Before: ___ tok/s (decode)
-    After:  ___ tok/s (decode)
-    Speedup: ___×
-```
+| Metric | Before CUDA defaults | Current smoke test | Target after tuning |
+|--------|----------------------|--------------------|---------------------|
+| Qwen3-4B decode | garbage / invalid output | 1.4 tok/s | TBD after llama.cpp baseline |
+| Correctness | failing | coherent | coherent |
+| CUDA errors | seen during bring-up | none in final smoke test | none |
 
 **Deliverable:** >20% decode speedup over v0.2, profiling evidence.
 
@@ -103,34 +165,37 @@ Based on profiling results from v0.2:
 
 **Goal:** stable operation for 1000+ tokens with no memory growth.
 
+Status: not yet tested beyond short smoke runs. Run this after v0.2 baseline.
+
+- [ ] Generate 1000 tokens continuously and capture tegrastats:
+
+```bash
+cd ~/genie-ai-runtime
+tegrastats --interval 1000 | tee stability-qwen3-1000.log &
+TEGRASTATS_PID=$!
+./build/jetson-llm \
+  -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+  -p "Write a concise technical overview of Jetson Orin Nano inference." \
+  -n 1000 -v
+kill "$TEGRASTATS_PID"
 ```
-□ Generate 1000 tokens continuously — monitor memory:
-    tegrastats --interval 1000 | tee stability.log &
-    ./jetson-llm -m model.gguf -p "Write a long essay..." -n 1000
 
-□ Verify no memory growth:
-    Plot RAM usage over time from stability.log
-    Delta between token 10 and token 1000 should be < 5 MB
+- [ ] Verify no memory growth:
+  delta between early steady state and token 1000 should be under 5 MB.
+- [ ] Test KV cache eviction:
+  run Qwen3-4B with `-c 512 -n 1000` and verify overflow/eviction behavior.
+- [ ] Test OOM guard:
+  attempt a larger model or an intentionally oversized context and verify graceful stop.
+- [ ] Test thermal stability:
+  30 minutes continuous generation at 25 W; stay below 85 deg C with active cooling.
+- [ ] Stress test rapid start/stop:
 
-□ Test KV cache eviction:
-    Set context limit to 512, generate 1000 tokens
-    Verify overflow pool works (eviction messages in stderr)
-
-□ Test OOM guard:
-    Load Llama 3.3 8B Q4_K_M (4.6 GB — tight fit)
-    Verify OOM guard stops gracefully (no crash, no OOM killer)
-    Verify message: "[oom_guard] Stopping at token N"
-
-□ Test thermal stability:
-    Run 30 minutes continuous generation at 25W
-    Monitor temperature — should stay below 85°C with active cooling
-    Verify thermal backoff activates if temp exceeds 80°C
-
-□ Stress test: rapid start/stop:
-    for i in {1..100}; do
-      ./jetson-llm -m model.gguf -p "Hi" -n 10 2>/dev/null
-    done
-    Verify no memory leak (free -m before and after)
+```bash
+for i in {1..100}; do
+  ./build/jetson-llm \
+    -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
+    -p "Hi" -n 10 >/tmp/jllm-stress.log 2>&1 || exit 1
+done
 ```
 
 **Deliverable:** stability report — memory graph, thermal graph, OOM test results.
@@ -141,33 +206,19 @@ Based on profiling results from v0.2:
 
 **Goal:** production-ready HTTP API with streaming.
 
-```
-□ Implement streaming SSE in http_server.cpp:
-    POST /v1/chat/completions with "stream": true
-    Returns: data: {"choices":[{"delta":{"content":"token"}}]}\n\n
-    Final: data: [DONE]\n\n
+Status: server binary builds, but the final Qwen CLI behavior has not yet been
+validated through HTTP.
 
-□ Add chat template formatting:
-    Llama: <|begin_of_text|><|start_header_id|>user<|end_header_id|>\n{prompt}<|eot_id|>
-    Generic: <|user|>\n{prompt}\n<|assistant|>\n
-
-□ Add request timeout (60 second default)
-
-□ Test with real clients:
-    □ curl with streaming: curl -N http://jetson:8080/v1/chat/completions ...
-    □ Python OpenAI SDK: client.chat.completions.create(stream=True)
-    □ Browser fetch with ReadableStream
-
-□ Add systemd service file:
-    /etc/systemd/system/jetson-llm.service
-    Restart=always, After=network.target
-    EnvironmentFile for model path and port
-
-□ Auto-start on boot, auto-restart on crash
-
-□ Health endpoint enhanced:
-    Add: uptime, total_requests, avg_tok_s, kv_cache_tokens_used
-```
+- [ ] Verify server uses the same Qwen chat template/no-think behavior as CLI.
+- [ ] Implement or validate streaming SSE in `http_server.cpp`:
+  `data: {"choices":[{"delta":{"content":"token"}}]}\n\n`, final `data: [DONE]\n\n`.
+- [ ] Add request timeout, default 60 seconds.
+- [ ] Test with real clients:
+  curl streaming, Python OpenAI SDK streaming, browser `ReadableStream`.
+- [ ] Add systemd service:
+  restart always, network dependency, environment file for model path and port.
+- [ ] Auto-start on boot and auto-restart on crash.
+- [ ] Enhance `/health` with uptime, total requests, average tok/s, and KV cache tokens used.
 
 **Deliverable:** streaming API working with OpenAI SDK, systemd service running.
 
@@ -177,33 +228,25 @@ Based on profiling results from v0.2:
 
 **Goal:** test and document performance across all Tier 1–2 models.
 
-```
-□ Test each model, record in performance table:
+Status: one Tier 2 model family validated; broader matrix remains.
 
-    Model              | Q4_K_M | Decode tok/s | Prompt tok/s | Peak RAM | Max ctx
-    ────────────────────────────────────────────────────────────────────────────
-    TinyLlama 1.1B     | 669 MB |    ___       |    ___       |   ___    |  ___
-    Llama 3.2 1B       | 750 MB |    ___       |    ___       |   ___    |  ___
-    Gemma 2 2B          | 1.5 GB |    ___       |    ___       |   ___    |  ___
-    Qwen 3 1.7B        | 1.0 GB |    ___       |    ___       |   ___    |  ___
-    Llama 3.2 3B       | 1.8 GB |    ___       |    ___       |   ___    |  ___
-    Phi-4 Mini 3.8B    | 2.3 GB |    ___       |    ___       |   ___    |  ___
-    Gemma 3 4B          | 2.5 GB |    ___       |    ___       |   ___    |  ___
-    Llama 3.3 8B       | 4.6 GB |    ___       |    ___       |   ___    |  ___
+| Model | Quant/file size | Decode tok/s | Prompt tok/s | Peak RAM | Max ctx | Status |
+|-------|-----------------|--------------|--------------|----------|---------|--------|
+| Qwen3 4B Instruct AWQ | 2381 MB `Q4_K_M` | 1.4 | 1.5 | 3425 MB | 4096 | validated CLI |
+| TinyLlama 1.1B | 669 MB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Llama 3.2 1B | 750 MB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Qwen3 1.7B | ~1.0 GB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Llama 3.2 3B | ~1.8 GB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Phi-4 Mini 3.8B | ~2.3 GB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Gemma 3 4B | ~2.5 GB `Q4_K_M` | TBD | TBD | TBD | TBD | not yet tested |
+| Llama 3.3 8B | ~4.6 GB `Q4_K_M` | TBD | TBD | TBD | TBD | stress / OOM guard |
 
-□ Verify tokenizer works for each model family:
-    □ Llama tokenizer (BPE)
-    □ Gemma tokenizer (SentencePiece)
-    □ Qwen tokenizer (tiktoken-style)
-    □ Phi tokenizer
-
-□ Document any model-specific issues:
-    □ Different tensor name patterns?
-    □ Different RoPE theta values?
-    □ GQA group sizes?
-
-□ Update README with tested models + performance table
-```
+- [x] Qwen tokenizer: BPE merges and special tokens.
+- [ ] Llama tokenizer family.
+- [ ] Gemma tokenizer family.
+- [ ] Phi tokenizer family.
+- [ ] Record tensor naming, RoPE theta, head_dim, and GQA differences per model.
+- [ ] Update README and `docs/performance.md` after each verified model.
 
 **Deliverable:** performance table with 8+ models, all verified working.
 
@@ -323,13 +366,13 @@ Based on profiling results from v0.2:
 ## Timeline Summary
 
 ```
-Week 1:   v0.1  First Tokens         □ build → test → first coherent output
-Week 2:   v0.2  Benchmark            □ measure → profile → compare vs llama.cpp
-Week 3-4: v0.3  Kernel Optimization  □ tune top 3 kernels → >20% speedup
-Week 5:   v0.4  Memory Stability     □ 1000 tokens stable → OOM guard → thermal
-Week 6:   v0.5  Server + Streaming   □ SSE → chat templates → systemd
-Week 7-8: v0.6  Multi-Model          □ test 8+ models → performance table
-Week 9-10:v0.7  Speculative Decode   □ draft+target → 1.5-2× speedup
-Week 11:  v0.8  Multi-Turn           □ KV persistence → conversation state
-Week 12:  v1.0  Production Release   □ 24-hour test → package → release
+Week 1:    v0.1  First Tokens         [x] Qwen3 coherent CLI output on Jetson
+Week 2:    v0.2  Benchmark            [ ] llama.cpp baseline + Nsight profile
+Week 3-4:  v0.3  Kernel Optimization  [~] GPU GEMV/RMSNorm/attention landed; tuning remains
+Week 5:    v0.4  Memory Stability     [ ] 1000 tokens + eviction + OOM + thermal
+Week 6:    v0.5  Server + Streaming   [ ] Qwen server parity + SSE + systemd
+Week 7-8:  v0.6  Multi-Model          [~] Qwen3-4B validated; 7+ models remain
+Week 9-10: v0.7  Speculative Decode   [ ] draft+target -> 1.5-2x speedup
+Week 11:   v0.8  Multi-Turn           [ ] KV persistence -> conversation state
+Week 12:   v1.0  Production Release   [ ] 24-hour test -> package -> release
 ```
