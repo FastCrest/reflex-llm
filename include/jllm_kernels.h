@@ -164,6 +164,23 @@ void rope_inplace(
     cudaStream_t   stream
 );
 
+// RoPE plus FP16 KV cache store for the common decode path. This replaces
+// rope_inplace() followed by two tiny K/V cudaMemcpyAsync calls.
+void rope_inplace_store_kv_fp16(
+    half*          q,
+    half*          k,
+    const half*    v,
+    half*          k_cache_dst,
+    half*          v_cache_dst,
+    int            n_heads,
+    int            n_kv_heads,
+    int            head_dim,
+    int            position,
+    float          theta_base,
+    bool           neox,
+    cudaStream_t   stream
+);
+
 // ── Flash Attention (single query, decode path) ──────────────────────────
 // Fused: Q×K^T → scale → softmax → ×V, all in shared memory + registers.
 // Tuned for 48 KB shared mem: TILE_Q=1 (decode), TILE_KV=64.

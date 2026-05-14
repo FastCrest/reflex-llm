@@ -64,6 +64,64 @@ __global__ void rope_kernel(
     ptr[idx1] = __float2half(v0 * sin_val + v1 * cos_val);
 }
 
+__global__ void rope_store_kv_fp16_kernel(
+    half*       __restrict__ q,
+    half*       __restrict__ k,
+    const half* __restrict__ v,
+    half*       __restrict__ k_cache_dst,
+    half*       __restrict__ v_cache_dst,
+    int n_heads, int n_kv_heads, int head_dim,
+    int position, float theta_base, bool neox)
+{
+    const int tid = blockIdx.x * blockDim.x + threadIdx.x;
+    const int half_dim = head_dim / 2;
+    const int q_pairs = n_heads * half_dim;
+    const int total_pairs = (n_heads + n_kv_heads) * half_dim;
+    const int kv_dim = n_kv_heads * head_dim;
+
+    if (tid < total_pairs) {
+        const bool is_q = tid < q_pairs;
+        int head, pair_idx;
+        half* ptr;
+        half* dst = nullptr;
+
+        if (is_q) {
+            head = tid / half_dim;
+            pair_idx = tid % half_dim;
+            ptr = q + head * head_dim;
+        } else {
+            const int k_tid = tid - q_pairs;
+            head = k_tid / half_dim;
+            pair_idx = k_tid % half_dim;
+            ptr = k + head * head_dim;
+            dst = k_cache_dst + head * head_dim;
+        }
+
+        const float freq = 1.0f / powf(theta_base, (2.0f * pair_idx) / head_dim);
+        const float angle = position * freq;
+        const float cos_val = cosf(angle);
+        const float sin_val = sinf(angle);
+
+        const int idx0 = neox ? pair_idx : pair_idx * 2;
+        const int idx1 = neox ? pair_idx + half_dim : pair_idx * 2 + 1;
+        const float v0 = __half2float(ptr[idx0]);
+        const float v1 = __half2float(ptr[idx1]);
+        const half r0 = __float2half(v0 * cos_val - v1 * sin_val);
+        const half r1 = __float2half(v0 * sin_val + v1 * cos_val);
+
+        ptr[idx0] = r0;
+        ptr[idx1] = r1;
+        if (!is_q) {
+            dst[idx0] = r0;
+            dst[idx1] = r1;
+        }
+    }
+
+    if (tid < kv_dim) {
+        v_cache_dst[tid] = v[tid];
+    }
+}
+
 void rope_inplace(half* q, half* k, int n_heads, int n_kv_heads,
                   int head_dim, int position, float theta_base,
                   bool neox, cudaStream_t stream) {
@@ -73,6 +131,22 @@ void rope_inplace(half* q, half* k, int n_heads, int n_kv_heads,
 
     rope_kernel<<<grid, block, 0, stream>>>(
         q, k, n_heads, n_kv_heads, head_dim, position, theta_base, neox);
+}
+
+void rope_inplace_store_kv_fp16(
+    half* q, half* k, const half* v,
+    half* k_cache_dst, half* v_cache_dst,
+    int n_heads, int n_kv_heads, int head_dim,
+    int position, float theta_base, bool neox, cudaStream_t stream) {
+    const int total_pairs = (n_heads + n_kv_heads) * (head_dim / 2);
+    const int kv_dim = n_kv_heads * head_dim;
+    const int total = total_pairs > kv_dim ? total_pairs : kv_dim;
+    const int block = BLOCK_SIZE;
+    const int grid = (total + block - 1) / block;
+
+    rope_store_kv_fp16_kernel<<<grid, block, 0, stream>>>(
+        q, k, v, k_cache_dst, v_cache_dst,
+        n_heads, n_kv_heads, head_dim, position, theta_base, neox);
 }
 
 }  // namespace jllm

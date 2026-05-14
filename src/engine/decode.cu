@@ -619,16 +619,27 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
                                config_.rms_eps, lw.qk_norm_type == 0, stream_);
     }
 
-    // 3. RoPE
-    rope_inplace(q_buf, k_buf, config_.n_heads, config_.n_kv_heads,
-                 config_.head_dim, pos, config_.rope_theta,
-                 config_.rope_neox, stream_);
+    // 3. RoPE and K/V cache store. The default FP16 fast-pool path fuses
+    // RoPE with the K/V writes to avoid two tiny cudaMemcpyAsync launches per
+    // layer. INT8 and overflow retain the explicit path.
+    if (!gen_params_.kv_int8 && kv_cache_.is_fast_position(pos)) {
+        rope_inplace_store_kv_fp16(q_buf, k_buf, v_buf,
+                                  (half*)kv_cache_.key_ptr(layer, pos),
+                                  (half*)kv_cache_.val_ptr(layer, pos),
+                                  config_.n_heads, config_.n_kv_heads,
+                                  config_.head_dim, pos, config_.rope_theta,
+                                  config_.rope_neox, stream_);
+    } else {
+        rope_inplace(q_buf, k_buf, config_.n_heads, config_.n_kv_heads,
+                     config_.head_dim, pos, config_.rope_theta,
+                     config_.rope_neox, stream_);
+    }
 
-    // 4. Store K/V into cache
+    // 4. Store K/V into cache for paths not handled by rope_inplace_store_kv_fp16.
     if (gen_params_.kv_int8) {
         fp16_to_int8((int8_t*)kv_cache_.key_ptr(layer, pos), nullptr, k_buf, 1, KV_DIM, stream_);
         fp16_to_int8((int8_t*)kv_cache_.val_ptr(layer, pos), nullptr, v_buf, 1, KV_DIM, stream_);
-    } else {
+    } else if (!kv_cache_.is_fast_position(pos)) {
         cudaMemcpyAsync(kv_cache_.key_ptr(layer, pos), k_buf,
                         KV_DIM * sizeof(half), cudaMemcpyDefault, stream_);
         cudaMemcpyAsync(kv_cache_.val_ptr(layer, pos), v_buf,

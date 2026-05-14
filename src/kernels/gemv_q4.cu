@@ -57,7 +57,7 @@ static int gemv_rows_per_block() {
     static const int rows = [] {
         const char* v = getenv("JLLM_GEMV_ROWS");
         int r = v ? atoi(v) : 8;
-        if (r != 4 && r != 8 && r != 16) r = 8;
+        if (r != 4 && r != 8) r = 8;
         return r;
     }();
     return rows;
@@ -127,39 +127,20 @@ __device__ __forceinline__ float dot_q4k_row(
     int lane)
 {
     float acc = 0.0f;
-    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q4_K& blk = row_blocks[b];
 
-        float dall = 0.0f;
-        float dmin = 0.0f;
-        if (lane == 0) {
-            dall = raw_fp16_to_float(blk.d_raw);
-            dmin = raw_fp16_to_float(blk.dmin_raw);
-        }
-        dall = __shfl_sync(mask, dall, 0);
-        dmin = __shfl_sync(mask, dmin, 0);
+        const float dall = raw_fp16_to_float(blk.d_raw);
+        const float dmin = raw_fp16_to_float(blk.dmin_raw);
         const int k_base = b * QK_K;
 
-        #pragma unroll
         for (int il = 0; il < 4; il++) {
             const int is = 2 * il;
 
-            int sc1 = 0, m1 = 0, sc2 = 0, m2 = 0;
-            if (lane == 0) {
-                uint8_t s1, min1, s2, min2;
-                get_scale_min_k4(is + 0, blk.scales, s1, min1);
-                get_scale_min_k4(is + 1, blk.scales, s2, min2);
-                sc1 = s1;
-                m1 = min1;
-                sc2 = s2;
-                m2 = min2;
-            }
-            sc1 = __shfl_sync(mask, sc1, 0);
-            m1  = __shfl_sync(mask, m1, 0);
-            sc2 = __shfl_sync(mask, sc2, 0);
-            m2  = __shfl_sync(mask, m2, 0);
+            uint8_t sc1, m1, sc2, m2;
+            get_scale_min_k4(is + 0, blk.scales, sc1, m1);
+            get_scale_min_k4(is + 1, blk.scales, sc2, m2);
 
             const float d1 = dall * sc1;
             const float dm1 = dmin * m1;
@@ -188,40 +169,21 @@ __device__ __forceinline__ float dot_q5k_row(
     int lane)
 {
     float acc = 0.0f;
-    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q5_K& blk = row_blocks[b];
 
-        float dall = 0.0f;
-        float dmin = 0.0f;
-        if (lane == 0) {
-            dall = raw_fp16_to_float(blk.d_raw);
-            dmin = raw_fp16_to_float(blk.dmin_raw);
-        }
-        dall = __shfl_sync(mask, dall, 0);
-        dmin = __shfl_sync(mask, dmin, 0);
+        const float dall = raw_fp16_to_float(blk.d_raw);
+        const float dmin = raw_fp16_to_float(blk.dmin_raw);
         const int k_base = b * QK_K;
 
         uint8_t u1 = 1;
         uint8_t u2 = 2;
-        #pragma unroll
         for (int il = 0; il < 4; il++) {
             const int is = 2 * il;
-            int sc1 = 0, m1 = 0, sc2 = 0, m2 = 0;
-            if (lane == 0) {
-                uint8_t s1, min1, s2, min2;
-                get_scale_min_k4(is + 0, blk.scales, s1, min1);
-                get_scale_min_k4(is + 1, blk.scales, s2, min2);
-                sc1 = s1;
-                m1 = min1;
-                sc2 = s2;
-                m2 = min2;
-            }
-            sc1 = __shfl_sync(mask, sc1, 0);
-            m1  = __shfl_sync(mask, m1, 0);
-            sc2 = __shfl_sync(mask, sc2, 0);
-            m2  = __shfl_sync(mask, m2, 0);
+            uint8_t sc1, m1, sc2, m2;
+            get_scale_min_k4(is + 0, blk.scales, sc1, m1);
+            get_scale_min_k4(is + 1, blk.scales, sc2, m2);
 
             const float d1 = dall * sc1;
             const float dm1 = dmin * m1;
@@ -254,36 +216,17 @@ __device__ __forceinline__ float dot_q6k_row(
     int lane)
 {
     float acc = 0.0f;
-    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q6_K& blk = row_blocks[b];
-        float d = 0.0f;
-        if (lane == 0) {
-            d = raw_fp16_to_float(blk.d_raw);
-        }
-        d = __shfl_sync(mask, d, 0);
+        const float d = raw_fp16_to_float(blk.d_raw);
         const int k_base = b * QK_K;
 
-        #pragma unroll
         for (int n = 0; n < QK_K; n += 128) {
             const uint8_t* ql = blk.ql + (n / 128) * 64;
             const uint8_t* qh = blk.qh + (n / 128) * 32;
             const int8_t*  sc = blk.scales + (n / 128) * 8;
             const int is = lane / 16;
-            const int src_lane = is * 16;
-
-            int sc0 = 0, sc2 = 0, sc4 = 0, sc6 = 0;
-            if ((lane & 15) == 0) {
-                sc0 = sc[is + 0];
-                sc2 = sc[is + 2];
-                sc4 = sc[is + 4];
-                sc6 = sc[is + 6];
-            }
-            sc0 = __shfl_sync(mask, sc0, src_lane);
-            sc2 = __shfl_sync(mask, sc2, src_lane);
-            sc4 = __shfl_sync(mask, sc4, src_lane);
-            sc6 = __shfl_sync(mask, sc6, src_lane);
 
             const int q1 = (int)((ql[lane +  0] & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
             const int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
@@ -291,10 +234,10 @@ __device__ __forceinline__ float dot_q6k_row(
             const int q4 = (int)((ql[lane + 32] >>  4) | (((qh[lane] >> 6) & 3) << 4)) - 32;
 
             const int k0 = k_base + n + lane;
-            acc += d * (float)sc0 * (float)q1 * __half2float(x[k0 +  0]);
-            acc += d * (float)sc2 * (float)q2 * __half2float(x[k0 + 32]);
-            acc += d * (float)sc4 * (float)q3 * __half2float(x[k0 + 64]);
-            acc += d * (float)sc6 * (float)q4 * __half2float(x[k0 + 96]);
+            acc += d * (float)sc[is + 0] * (float)q1 * __half2float(x[k0 +  0]);
+            acc += d * (float)sc[is + 2] * (float)q2 * __half2float(x[k0 + 32]);
+            acc += d * (float)sc[is + 4] * (float)q3 * __half2float(x[k0 + 64]);
+            acc += d * (float)sc[is + 6] * (float)q4 * __half2float(x[k0 + 96]);
         }
     }
 

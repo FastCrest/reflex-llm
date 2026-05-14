@@ -126,6 +126,7 @@ public:
     int64_t capacity_bytes() const;
     int     used_tokens() const { return used_tokens_; }
     int     max_tokens() const { return cfg_.max_context + cfg_.overflow_context; }
+    bool    is_fast_position(int pos) const { return pos < cfg_.max_context; }
 
     // Evict oldest tokens from fast pool to overflow (when fast pool full)
     void evict(int n_tokens);
