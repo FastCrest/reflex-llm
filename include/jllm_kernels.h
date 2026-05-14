@@ -106,8 +106,8 @@ void gemv_quant_triple(
     cudaStream_t   stream
 );
 
-// CPU reference K-quant GEMV that writes FP32 output. Used for logits while
-// the quantized CUDA path is being brought up.
+// K-quant GEMV that writes FP32 output. Used for logits to avoid an
+// intermediate FP16 projection plus FP16->FP32 conversion.
 void gemv_quant_f32(
     float*         y,
     const void*    W,

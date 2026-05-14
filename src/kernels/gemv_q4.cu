@@ -57,7 +57,7 @@ static int gemv_rows_per_block() {
     static const int rows = [] {
         const char* v = getenv("JLLM_GEMV_ROWS");
         int r = v ? atoi(v) : 8;
-        if (r != 4 && r != 8) r = 8;
+        if (r != 4 && r != 8 && r != 16) r = 8;
         return r;
     }();
     return rows;
@@ -127,20 +127,39 @@ __device__ __forceinline__ float dot_q4k_row(
     int lane)
 {
     float acc = 0.0f;
+    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q4_K& blk = row_blocks[b];
 
-        const float dall = raw_fp16_to_float(blk.d_raw);
-        const float dmin = raw_fp16_to_float(blk.dmin_raw);
+        float dall = 0.0f;
+        float dmin = 0.0f;
+        if (lane == 0) {
+            dall = raw_fp16_to_float(blk.d_raw);
+            dmin = raw_fp16_to_float(blk.dmin_raw);
+        }
+        dall = __shfl_sync(mask, dall, 0);
+        dmin = __shfl_sync(mask, dmin, 0);
         const int k_base = b * QK_K;
 
+        #pragma unroll
         for (int il = 0; il < 4; il++) {
             const int is = 2 * il;
 
-            uint8_t sc1, m1, sc2, m2;
-            get_scale_min_k4(is + 0, blk.scales, sc1, m1);
-            get_scale_min_k4(is + 1, blk.scales, sc2, m2);
+            int sc1 = 0, m1 = 0, sc2 = 0, m2 = 0;
+            if (lane == 0) {
+                uint8_t s1, min1, s2, min2;
+                get_scale_min_k4(is + 0, blk.scales, s1, min1);
+                get_scale_min_k4(is + 1, blk.scales, s2, min2);
+                sc1 = s1;
+                m1 = min1;
+                sc2 = s2;
+                m2 = min2;
+            }
+            sc1 = __shfl_sync(mask, sc1, 0);
+            m1  = __shfl_sync(mask, m1, 0);
+            sc2 = __shfl_sync(mask, sc2, 0);
+            m2  = __shfl_sync(mask, m2, 0);
 
             const float d1 = dall * sc1;
             const float dm1 = dmin * m1;
@@ -169,21 +188,40 @@ __device__ __forceinline__ float dot_q5k_row(
     int lane)
 {
     float acc = 0.0f;
+    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q5_K& blk = row_blocks[b];
 
-        const float dall = raw_fp16_to_float(blk.d_raw);
-        const float dmin = raw_fp16_to_float(blk.dmin_raw);
+        float dall = 0.0f;
+        float dmin = 0.0f;
+        if (lane == 0) {
+            dall = raw_fp16_to_float(blk.d_raw);
+            dmin = raw_fp16_to_float(blk.dmin_raw);
+        }
+        dall = __shfl_sync(mask, dall, 0);
+        dmin = __shfl_sync(mask, dmin, 0);
         const int k_base = b * QK_K;
 
         uint8_t u1 = 1;
         uint8_t u2 = 2;
+        #pragma unroll
         for (int il = 0; il < 4; il++) {
             const int is = 2 * il;
-            uint8_t sc1, m1, sc2, m2;
-            get_scale_min_k4(is + 0, blk.scales, sc1, m1);
-            get_scale_min_k4(is + 1, blk.scales, sc2, m2);
+            int sc1 = 0, m1 = 0, sc2 = 0, m2 = 0;
+            if (lane == 0) {
+                uint8_t s1, min1, s2, min2;
+                get_scale_min_k4(is + 0, blk.scales, s1, min1);
+                get_scale_min_k4(is + 1, blk.scales, s2, min2);
+                sc1 = s1;
+                m1 = min1;
+                sc2 = s2;
+                m2 = min2;
+            }
+            sc1 = __shfl_sync(mask, sc1, 0);
+            m1  = __shfl_sync(mask, m1, 0);
+            sc2 = __shfl_sync(mask, sc2, 0);
+            m2  = __shfl_sync(mask, m2, 0);
 
             const float d1 = dall * sc1;
             const float dm1 = dmin * m1;
@@ -216,17 +254,36 @@ __device__ __forceinline__ float dot_q6k_row(
     int lane)
 {
     float acc = 0.0f;
+    const unsigned mask = 0xFFFFFFFFu;
 
     for (int b = 0; b < n_blocks; b++) {
         const block_q6_K& blk = row_blocks[b];
-        const float d = raw_fp16_to_float(blk.d_raw);
+        float d = 0.0f;
+        if (lane == 0) {
+            d = raw_fp16_to_float(blk.d_raw);
+        }
+        d = __shfl_sync(mask, d, 0);
         const int k_base = b * QK_K;
 
+        #pragma unroll
         for (int n = 0; n < QK_K; n += 128) {
             const uint8_t* ql = blk.ql + (n / 128) * 64;
             const uint8_t* qh = blk.qh + (n / 128) * 32;
             const int8_t*  sc = blk.scales + (n / 128) * 8;
             const int is = lane / 16;
+            const int src_lane = is * 16;
+
+            int sc0 = 0, sc2 = 0, sc4 = 0, sc6 = 0;
+            if ((lane & 15) == 0) {
+                sc0 = sc[is + 0];
+                sc2 = sc[is + 2];
+                sc4 = sc[is + 4];
+                sc6 = sc[is + 6];
+            }
+            sc0 = __shfl_sync(mask, sc0, src_lane);
+            sc2 = __shfl_sync(mask, sc2, src_lane);
+            sc4 = __shfl_sync(mask, sc4, src_lane);
+            sc6 = __shfl_sync(mask, sc6, src_lane);
 
             const int q1 = (int)((ql[lane +  0] & 0xF) | (((qh[lane] >> 0) & 3) << 4)) - 32;
             const int q2 = (int)((ql[lane + 32] & 0xF) | (((qh[lane] >> 2) & 3) << 4)) - 32;
@@ -234,10 +291,10 @@ __device__ __forceinline__ float dot_q6k_row(
             const int q4 = (int)((ql[lane + 32] >>  4) | (((qh[lane] >> 6) & 3) << 4)) - 32;
 
             const int k0 = k_base + n + lane;
-            acc += d * (float)sc[is + 0] * (float)q1 * __half2float(x[k0 +  0]);
-            acc += d * (float)sc[is + 2] * (float)q2 * __half2float(x[k0 + 32]);
-            acc += d * (float)sc[is + 4] * (float)q3 * __half2float(x[k0 + 64]);
-            acc += d * (float)sc[is + 6] * (float)q4 * __half2float(x[k0 + 96]);
+            acc += d * (float)sc0 * (float)q1 * __half2float(x[k0 +  0]);
+            acc += d * (float)sc2 * (float)q2 * __half2float(x[k0 + 32]);
+            acc += d * (float)sc4 * (float)q3 * __half2float(x[k0 + 64]);
+            acc += d * (float)sc6 * (float)q4 * __half2float(x[k0 + 96]);
         }
     }
 
@@ -326,6 +383,60 @@ __global__ void gemv_q6k_kernel(
 
     if (lane == 0)
         y[row] = __float2half(acc);
+}
+
+__global__ void gemv_q4k_f32_kernel(
+    float*             __restrict__ y,
+    const block_q4_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q4k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
+
+    if (lane == 0)
+        y[row] = acc;
+}
+
+__global__ void gemv_q5k_f32_kernel(
+    float*             __restrict__ y,
+    const block_q5_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q5k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
+
+    if (lane == 0)
+        y[row] = acc;
+}
+
+__global__ void gemv_q6k_f32_kernel(
+    float*             __restrict__ y,
+    const block_q6_K*  __restrict__ W,
+    const half*        __restrict__ x,
+    int M, int K, int rows_per_block)
+{
+    const int row  = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_q6k_row(W + (int64_t)row * n_blocks, x, n_blocks, lane);
+    acc = warp_reduce_sum(acc);
+
+    if (lane == 0)
+        y[row] = acc;
 }
 
 __global__ void gemv_quant_pair_kernel(
@@ -573,6 +684,44 @@ static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
     return true;
 }
 
+static bool gemv_quant_gpu_f32(float* y, const void* W, int ggml_type,
+                               const half* x, int M, int K, cudaStream_t stream) {
+    const void* W_device = resolve_weight_device_ptr(W);
+    if (!W_device) {
+        return false;
+    }
+
+    const int rows_per_block = gemv_rows_per_block();
+    const int block = rows_per_block * 32;
+    const int grid = (M + rows_per_block - 1) / rows_per_block;
+
+    switch (ggml_type) {
+        case 12:
+            gemv_q4k_f32_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q4_K*)W_device, x, M, K, rows_per_block);
+            break;
+        case 13:
+            gemv_q5k_f32_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q5_K*)W_device, x, M, K, rows_per_block);
+            break;
+        case 14:
+            gemv_q6k_f32_kernel<<<grid, block, 0, stream>>>(
+                y, (const block_q6_K*)W_device, x, M, K, rows_per_block);
+            break;
+        default:
+            fprintf(stderr, "[GEMV] FATAL: unsupported GPU GGML type %d (M=%d K=%d)\n",
+                    ggml_type, M, K);
+            return false;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GEMV] GPU FP32 launch failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
 static bool supported_gpu_type(int ggml_type) {
     return ggml_type == 12 || ggml_type == 13 || ggml_type == 14;
 }
@@ -652,11 +801,6 @@ static bool gemv_quant_triple_gpu(
         return false;
     }
     return true;
-}
-
-__global__ void half_to_float_kernel(float* out, const half* in, int n) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i < n) out[i] = __half2float(in[i]);
 }
 
 static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type,
@@ -868,29 +1012,7 @@ void gemv_quant_triple(
 void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
                     int M, int K, cudaStream_t stream) {
     if (fast_gemv_enabled()) {
-        half* tmp = nullptr;
-        cudaError_t err = cudaMalloc(&tmp, M * sizeof(half));
-        if (err != cudaSuccess) {
-            fprintf(stderr, "[GEMV] cudaMalloc tmp logits failed: %s\n",
-                    cudaGetErrorString(err));
-            cudaMemsetAsync(y, 0, M * sizeof(float), stream);
-            return;
-        }
-
-        if (!gemv_quant_gpu(tmp, W, ggml_type, x, M, K, stream)) {
-            cudaFree(tmp);
-        } else {
-            int block = 256;
-            int grid = (M + block - 1) / block;
-            half_to_float_kernel<<<grid, block, 0, stream>>>(y, tmp, M);
-            err = cudaStreamSynchronize(stream);
-            cudaFree(tmp);
-            if (err == cudaSuccess) {
-                return;
-            }
-            fprintf(stderr, "[GEMV] GPU FP32 output path failed: %s\n",
-                    cudaGetErrorString(err));
-            cudaMemsetAsync(y, 0, M * sizeof(float), stream);
+        if (gemv_quant_gpu_f32(y, W, ggml_type, x, M, K, stream)) {
             return;
         }
     }

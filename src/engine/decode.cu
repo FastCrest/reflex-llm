@@ -369,7 +369,7 @@ static bool materialize_norm_weights(ModelWeights& mw, int hidden_dim,
 static bool device_output_enabled() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_DEVICE_OUTPUT");
-        return !v || strcmp(v, "0") != 0;
+        return v && strcmp(v, "0") != 0;
     }();
     return enabled;
 }
@@ -503,7 +503,6 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     scratch_bytes += kv_dim * sizeof(half) * 2;  // k, v
     scratch_bytes += config_.intermediate_dim * sizeof(half) * 4;
     scratch_bytes += config_.vocab_size * sizeof(float);
-    scratch_bytes += config_.vocab_size * sizeof(half);
     scratch_bytes = std::max(scratch_bytes, (int64_t)64 * 1024 * 1024);
     scratch_bytes = (scratch_bytes + 4095) & ~4095LL;
 
@@ -715,20 +714,17 @@ int Engine::decode_step(int pos) {
         prof_t = now;
     }
 
-    // Logits: reuse scratch for the FP16 projection and FP32 conversion. This
-    // avoids a cudaMalloc/cudaFree pair in the decode loop for every token.
-    half* logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
+    // Logits: write FP32 directly from the output projection. This avoids an
+    // intermediate FP16 logits buffer plus a separate conversion kernel.
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
 
-    if (!logits_fp16 || !logits_fp32 || !host_logits_ ||
-        host_logits_capacity_ < config_.vocab_size) {
+    if (!logits_fp32 || !host_logits_ || host_logits_capacity_ < config_.vocab_size) {
         fprintf(stderr, "[decode] FATAL: failed to allocate logits buffer\n");
         return tokenizer_.eos_id;
     }
 
-    gemv_quant(logits_fp16, model_weights_.output, model_weights_.output_type,
-               normed, config_.vocab_size, H, stream_);
-    fp16_to_fp32(logits_fp32, logits_fp16, config_.vocab_size, stream_);
+    gemv_quant_f32(logits_fp32, model_weights_.output, model_weights_.output_type,
+                   normed, config_.vocab_size, H, stream_);
 
     // Copy FP32 logits to a pinned host buffer for CPU sampling.
     cudaError_t copy_err = cudaMemcpyAsync(host_logits_, logits_fp32,
@@ -816,12 +812,10 @@ void Engine::build_cuda_graph(int pos) {
     fused_rmsnorm_residual(g_normed, graph_x, nullptr,
                           model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
-    // Capture logit projection without per-token cudaMalloc/cudaFree.
-    half* g_logits_fp16 = (half*)scratch_.get(config_.vocab_size * sizeof(half));
+    // Capture logit projection without an intermediate FP16 logits pass.
     float* g_logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
-    gemv_quant(g_logits_fp16, model_weights_.output, model_weights_.output_type,
-               g_normed, config_.vocab_size, H, stream_);
-    fp16_to_fp32(g_logits_fp32, g_logits_fp16, config_.vocab_size, stream_);
+    gemv_quant_f32(g_logits_fp32, model_weights_.output, model_weights_.output_type,
+                   g_normed, config_.vocab_size, H, stream_);
 
     cudaError_t err = cudaStreamEndCapture(stream_, &decode_graph_);
     if (err != cudaSuccess) {
