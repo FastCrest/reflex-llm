@@ -420,8 +420,8 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     const int q_dim = config_.n_heads * config_.head_dim;
     const int kv_dim = config_.n_kv_heads * config_.head_dim;
     scratch_bytes += config_.hidden_dim * sizeof(half) * 8;
-    scratch_bytes += q_dim * sizeof(half) * 3;   // q, attention output, q zero
-    scratch_bytes += kv_dim * sizeof(half) * 3;  // k, v, k zero
+    scratch_bytes += q_dim * sizeof(half) * 2;   // q, attention output
+    scratch_bytes += kv_dim * sizeof(half) * 2;  // k, v
     scratch_bytes += config_.intermediate_dim * sizeof(half) * 4;
     scratch_bytes += config_.vocab_size * sizeof(float);
     scratch_bytes += config_.vocab_size * sizeof(half);
@@ -498,10 +498,8 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     }
 
     // 1. Pre-attention RMSNorm: normed = RMSNorm(x) * weight
-    half* zero_buf = (half*)scratch_.get(H * sizeof(half));
-    cudaMemsetAsync(zero_buf, 0, H * sizeof(half), stream_);
     bool norm_fp32 = (lw.rms_type == 0);  // 0=F32, 1=F16
-    fused_rmsnorm_residual(normed, x, zero_buf, lw.rms_attn, 1, H, config_.rms_eps, norm_fp32, stream_);
+    fused_rmsnorm_residual(normed, x, nullptr, lw.rms_attn, 1, H, config_.rms_eps, norm_fp32, stream_);
 
     // Debug: check normed output
     if (debug_kernels_enabled() && layer_dbg <= 1 && layer == 0) {
@@ -519,14 +517,10 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     gemv_quant(v_buf, lw.wv, lw.type_wv, normed, KV_DIM, H, stream_);
 
     if (lw.q_norm && lw.k_norm) {
-        half* q_zero = (half*)scratch_.get(Q_DIM * sizeof(half));
-        half* k_zero = (half*)scratch_.get(KV_DIM * sizeof(half));
-        cudaMemsetAsync(q_zero, 0, Q_DIM * sizeof(half), stream_);
-        cudaMemsetAsync(k_zero, 0, KV_DIM * sizeof(half), stream_);
-        fused_rmsnorm_residual(q_buf, q_buf, q_zero, lw.q_norm,
+        fused_rmsnorm_residual(q_buf, q_buf, nullptr, lw.q_norm,
                                config_.n_heads, config_.head_dim,
                                config_.rms_eps, lw.qk_norm_type == 0, stream_);
-        fused_rmsnorm_residual(k_buf, k_buf, k_zero, lw.k_norm,
+        fused_rmsnorm_residual(k_buf, k_buf, nullptr, lw.k_norm,
                                config_.n_kv_heads, config_.head_dim,
                                config_.rms_eps, lw.qk_norm_type == 0, stream_);
     }
@@ -563,7 +557,7 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
     // ── FFN block ────────────────────────────────────────────
 
     // 8. Pre-FFN RMSNorm: normed2 = RMSNorm(x2) * weight
-    fused_rmsnorm_residual(normed2, x2, zero_buf, lw.rms_ffn, 1, H, config_.rms_eps, norm_fp32, stream_);
+    fused_rmsnorm_residual(normed2, x2, nullptr, lw.rms_ffn, 1, H, config_.rms_eps, norm_fp32, stream_);
 
     // 9. Gate and up projections
     gemv_quant(gate_buf, lw.w_gate, lw.type_w_gate, normed2, I, H, stream_);
@@ -598,9 +592,7 @@ int Engine::decode_step(int pos) {
 
     // Final RMSNorm
     half* normed = (half*)scratch_.get(H * sizeof(half));
-    half* zero = (half*)scratch_.get(H * sizeof(half));
-    cudaMemsetAsync(zero, 0, H * sizeof(half), stream_);
-    fused_rmsnorm_residual(normed, x, zero, model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
+    fused_rmsnorm_residual(normed, x, nullptr, model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
     // Logits: reference FP32 GEMV while quantized CUDA matvec is being validated.
     float* logits_fp32 = (float*)scratch_.get(config_.vocab_size * sizeof(float));
@@ -657,9 +649,7 @@ void Engine::build_cuda_graph(int pos) {
 
     // Capture final norm
     half* g_normed = (half*)scratch_.get(H * sizeof(half));
-    half* g_zero = (half*)scratch_.get(H * sizeof(half));
-    cudaMemsetAsync(g_zero, 0, H * sizeof(half), stream_);
-    fused_rmsnorm_residual(g_normed, graph_x, g_zero,
+    fused_rmsnorm_residual(g_normed, graph_x, nullptr,
                           model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
 
     // Capture logit projection.

@@ -4,9 +4,20 @@
 #include "jllm_kernels.h"
 #include <cuda_fp16.h>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace jllm {
+
+static bool fast_norm_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_NORM");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
 
 // Single-pass RMSNorm: avoid the previous two-pass sdata cache entirely.
 //
@@ -88,15 +99,36 @@ __global__ void fused_rmsnorm_residual_kernel(
 void fused_rmsnorm_residual(half* output, const half* x, const half* residual,
                             const void* weight, int rows, int hidden_dim,
                             float eps, bool weight_fp32, cudaStream_t stream) {
+    if (fast_norm_enabled()) {
+        static bool logged = false;
+        if (!logged) {
+            fprintf(stderr, "[norm] Using CUDA RMSNorm path\n");
+            logged = true;
+        }
+
+        const int block = 128;
+        fused_rmsnorm_residual_kernel<<<rows, block, 0, stream>>>(
+            output, x, residual, weight, rows, hidden_dim, eps, weight_fp32);
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) {
+            return;
+        }
+
+        fprintf(stderr, "[norm] CUDA RMSNorm launch failed: %s; falling back to CPU reference\n",
+                cudaGetErrorString(err));
+    }
+
     const int total = rows * hidden_dim;
     std::vector<half> h_x(total);
-    std::vector<half> h_res(total);
     std::vector<half> h_out(total);
     std::vector<float> h_w(hidden_dim);
 
     cudaStreamSynchronize(stream);
     cudaMemcpy(h_x.data(), x, total * sizeof(half), cudaMemcpyDeviceToHost);
+
+    std::vector<half> h_res;
     if (residual) {
+        h_res.resize(total);
         cudaMemcpy(h_res.data(), residual, total * sizeof(half), cudaMemcpyDeviceToHost);
     }
 
