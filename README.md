@@ -114,6 +114,7 @@ JLLM_FAST_NORM=0  # use CPU reference RMSNorm
 JLLM_FAST_ATTN=0  # use CPU reference decode attention
 JLLM_FAST_SAMPLE=0  # use full-vocab reference sampling path
 JLLM_DEVICE_OUTPUT=0  # disable automatic output projection device copy
+JLLM_DEVICE_LAYERS=0  # disable automatic layer weight device copies; set N to cap copied layers
 JLLM_KV_OVERFLOW=1024  # optional extra CPU overflow tokens (default: 0)
 JLLM_GEMV_ROWS=4  # use the previous 4-row GEMV launch shape (default: 8)
 JLLM_PROFILE=1  # print per-token decode timing breakdown

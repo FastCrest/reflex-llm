@@ -401,6 +401,24 @@ static bool device_output_enabled() {
     return enabled;
 }
 
+static bool fast_gemv_enabled_for_device_weights() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_GEMV");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
+static int device_layer_limit() {
+    static const int limit = [] {
+        const char* v = getenv("JLLM_DEVICE_LAYERS");
+        if (!v) return -1;  // auto
+        int n = atoi(v);
+        return n < 0 ? -1 : n;
+    }();
+    return limit;
+}
+
 static int kv_overflow_context(int ctx) {
     const char* v = getenv("JLLM_KV_OVERFLOW");
     if (!v || strcmp(v, "0") == 0) return 0;
@@ -428,7 +446,10 @@ static size_t kquant_tensor_bytes(int ggml_type, int rows, int cols) {
 static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg,
                                         const MemoryBudget& budget,
                                         std::vector<void*>& owned) {
-    if (!device_output_enabled() || !mw.output) return 0;
+    if (!device_output_enabled() || !fast_gemv_enabled_for_device_weights() ||
+        !mw.output) {
+        return 0;
+    }
 
     const size_t bytes = kquant_tensor_bytes(mw.output_type,
                                              cfg.vocab_size,
@@ -467,6 +488,111 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
             "[model] Materialized output projection on device (%zu MB)\n",
             bytes / (1024 * 1024));
     return bytes;
+}
+
+static size_t layer_quant_weight_bytes(const LayerWeights& lw,
+                                       const ModelConfig& cfg) {
+    const int H = cfg.hidden_dim;
+    const int Q = cfg.n_heads * cfg.head_dim;
+    const int KV = cfg.n_kv_heads * cfg.head_dim;
+    const int I = cfg.intermediate_dim;
+
+    size_t bytes = 0;
+    bytes += kquant_tensor_bytes(lw.type_wq, Q, H);
+    bytes += kquant_tensor_bytes(lw.type_wk, KV, H);
+    bytes += kquant_tensor_bytes(lw.type_wv, KV, H);
+    bytes += kquant_tensor_bytes(lw.type_wo, H, Q);
+    bytes += kquant_tensor_bytes(lw.type_w_gate, I, H);
+    bytes += kquant_tensor_bytes(lw.type_w_up, I, H);
+    bytes += kquant_tensor_bytes(lw.type_w_down, H, I);
+    return bytes;
+}
+
+static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
+                                               const ModelConfig& cfg,
+                                               std::vector<void*>& owned) {
+    const int H = cfg.hidden_dim;
+    const int Q = cfg.n_heads * cfg.head_dim;
+    const int KV = cfg.n_kv_heads * cfg.head_dim;
+    const int I = cfg.intermediate_dim;
+
+    struct Spec {
+        const void* src;
+        const void** dst;
+        int type;
+        int rows;
+        int cols;
+    };
+
+    Spec specs[] = {
+        {lw.wq, &lw.wq, lw.type_wq, Q, H},
+        {lw.wk, &lw.wk, lw.type_wk, KV, H},
+        {lw.wv, &lw.wv, lw.type_wv, KV, H},
+        {lw.wo, &lw.wo, lw.type_wo, H, Q},
+        {lw.w_gate, &lw.w_gate, lw.type_w_gate, I, H},
+        {lw.w_up, &lw.w_up, lw.type_w_up, I, H},
+        {lw.w_down, &lw.w_down, lw.type_w_down, H, I},
+    };
+
+    void* copied[sizeof(specs) / sizeof(specs[0])] = {};
+    for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+        const size_t bytes = kquant_tensor_bytes(specs[i].type,
+                                                 specs[i].rows,
+                                                 specs[i].cols);
+        if (bytes == 0 || !copy_weight_to_device(specs[i].src, bytes, &copied[i])) {
+            for (void* p : copied) {
+                if (p) cudaFree(p);
+            }
+            return false;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+        *specs[i].dst = copied[i];
+        owned.push_back(copied[i]);
+    }
+    return true;
+}
+
+static size_t materialize_layer_weights(ModelWeights& mw,
+                                        const ModelConfig& cfg,
+                                        const MemoryBudget& budget,
+                                        std::vector<void*>& owned) {
+    if (!fast_gemv_enabled_for_device_weights()) return 0;
+
+    const int requested_layers = device_layer_limit();
+    if (requested_layers == 0) return 0;
+
+    const int layer_cap = requested_layers < 0
+        ? mw.n_layers
+        : std::min(requested_layers, mw.n_layers);
+    const int64_t reserve_mb = 128;
+    int64_t free_mb = budget.free_mb();
+    size_t total_bytes = 0;
+    int copied_layers = 0;
+
+    for (int l = 0; l < layer_cap; l++) {
+        auto& lw = mw.layers[l];
+        const size_t bytes = layer_quant_weight_bytes(lw, cfg);
+        if (bytes == 0) break;
+
+        const int64_t mb =
+            (int64_t)((bytes + 1024 * 1024 - 1) / (1024 * 1024));
+        if (free_mb < mb + reserve_mb) break;
+
+        if (!copy_layer_quant_weights_to_device(lw, cfg, owned)) break;
+
+        free_mb -= mb;
+        total_bytes += bytes;
+        copied_layers++;
+    }
+
+    if (copied_layers > 0) {
+        fprintf(stderr,
+                "[model] Materialized %d transformer layers on device (%zu MB)\n",
+                copied_layers, total_bytes / (1024 * 1024));
+    }
+    return total_bytes;
 }
 
 bool Engine::load(const std::string& gguf_path, const GenParams& params) {
@@ -550,6 +676,11 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
         materialize_output_weight(model_weights_, config_, budget_,
                                   device_weight_copies_);
     budget_.model_mb += output_device_bytes / (1024 * 1024);
+
+    const size_t layer_device_bytes =
+        materialize_layer_weights(model_weights_, config_, budget_,
+                                  device_weight_copies_);
+    budget_.model_mb += layer_device_bytes / (1024 * 1024);
 
     cudaStreamCreate(&stream_);
     tokenizer_.load_from_gguf(gguf_path);
