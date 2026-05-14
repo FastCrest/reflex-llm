@@ -11,6 +11,7 @@
 #include "jllm_engine.h"
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -27,6 +28,11 @@ struct MappedWeightRegion {
 };
 
 MappedWeightRegion g_mapped_weight_region;
+
+bool mapped_weight_device_enabled() {
+    const char* v = getenv("JLLM_MAPPED_WEIGHTS");
+    return !v || strcmp(v, "0") != 0;
+}
 
 }  // namespace
 
@@ -282,34 +288,39 @@ bool load_gguf_weights(const std::string& path, void** weights, int64_t* size) {
     // Advise kernel: we'll read sequentially during load, then random during inference
     madvise(mapped, *size, MADV_SEQUENTIAL);
 
-    // On Jetson unified memory, mmap'd file is already in DRAM. CUDA kernels
-    // still need a device-visible virtual address for it; raw host mmap
-    // pointers trap with illegal memory accesses. Register the mapping as
-    // mapped host memory and record the device alias for opt-in GPU GEMV.
-    (void)cudaSetDeviceFlags(cudaDeviceMapHost);
-    (void)cudaGetLastError();  // clear cudaErrorSetOnActiveProcess if any
-
-    cudaError_t err = cudaHostRegister(
-        mapped, *size,
-        cudaHostRegisterPortable | cudaHostRegisterReadOnly | cudaHostRegisterMapped);
-    if (err != cudaSuccess) {
-        fprintf(stderr, "[gguf] cudaHostRegister failed: %s (continuing without pin)\n",
-                cudaGetErrorString(err));
-        // Not fatal: CPU reference paths can still read the mmap directly.
-        // GPU GEMV will decline to launch without a mapped device alias.
+    if (!mapped_weight_device_enabled()) {
+        fprintf(stderr,
+                "[gguf] CUDA mapped host weights disabled (JLLM_MAPPED_WEIGHTS=0)\n");
     } else {
-        void* mapped_device = nullptr;
-        err = cudaHostGetDevicePointer(&mapped_device, mapped, 0);
-        if (err == cudaSuccess && mapped_device) {
-            register_mapped_weight_region(mapped, mapped_device, *size);
-            fprintf(stderr, "[gguf] CUDA mapped host weights at %p -> %p\n",
-                    mapped, mapped_device);
-        } else {
-            fprintf(stderr,
-                    "[gguf] cudaHostGetDevicePointer failed: %s "
-                    "(GPU GEMV will use CPU fallback)\n",
+        // On Jetson unified memory, mmap'd file is already in DRAM. CUDA kernels
+        // still need a device-visible virtual address for it; raw host mmap
+        // pointers trap with illegal memory accesses. Register the mapping as
+        // mapped host memory and record the device alias for opt-in GPU GEMV.
+        (void)cudaSetDeviceFlags(cudaDeviceMapHost);
+        (void)cudaGetLastError();  // clear cudaErrorSetOnActiveProcess if any
+
+        cudaError_t err = cudaHostRegister(
+            mapped, *size,
+            cudaHostRegisterPortable | cudaHostRegisterReadOnly | cudaHostRegisterMapped);
+        if (err != cudaSuccess) {
+            fprintf(stderr, "[gguf] cudaHostRegister failed: %s (continuing without pin)\n",
                     cudaGetErrorString(err));
-            (void)cudaGetLastError();
+            // Not fatal: CPU reference paths can still read the mmap directly.
+            // GPU GEMV will decline to launch without a mapped device alias.
+        } else {
+            void* mapped_device = nullptr;
+            err = cudaHostGetDevicePointer(&mapped_device, mapped, 0);
+            if (err == cudaSuccess && mapped_device) {
+                register_mapped_weight_region(mapped, mapped_device, *size);
+                fprintf(stderr, "[gguf] CUDA mapped host weights at %p -> %p\n",
+                        mapped, mapped_device);
+            } else {
+                fprintf(stderr,
+                        "[gguf] cudaHostGetDevicePointer failed: %s "
+                        "(GPU GEMV will use CPU fallback)\n",
+                        cudaGetErrorString(err));
+                (void)cudaGetLastError();
+            }
         }
     }
 

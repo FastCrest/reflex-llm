@@ -44,9 +44,11 @@ Validated fast paths are now default:
 
 The output projection is materialized into CUDA device memory automatically
 when the memory budget allows it. Set `JLLM_DEVICE_OUTPUT=0` to force the
-mapped-host path. Transformer layer weights are also copied into device memory
-until the budget reaches its decode reserve; set `JLLM_DEVICE_LAYERS=0` to
-disable that, or `JLLM_DEVICE_LAYERS=<N>` to cap the copied layers. Extra CPU
+mapped-host path. Transformer layer weights stay mapped-host by default because
+duplicating them on top of a pinned full-file mapping costs memory without a
+measured speedup. For experimental llama.cpp-style placement, set
+`JLLM_MAPPED_WEIGHTS=0 JLLM_DEVICE_LAYERS=36` to skip full-file CUDA host
+registration and copy layer weights into CUDA allocations instead. Extra CPU
 overflow KV tokens are opt-in with `JLLM_KV_OVERFLOW=<tokens>`; the default
 keeps memory available for hot decode weights first.
 

@@ -310,8 +310,12 @@ void Engine::unload() {
     kv_cache_.destroy();
     scratch_.destroy();
     if (weights_) {
-        clear_mapped_weight_region(weights_);
-        cudaHostUnregister(weights_);
+        if (resolve_mapped_weight_device_ptr(weights_)) {
+            clear_mapped_weight_region(weights_);
+            cudaHostUnregister(weights_);
+        } else {
+            clear_mapped_weight_region(weights_);
+        }
         munmap(weights_, weights_size_);  // now works — #include <sys/mman.h> added
         weights_ = nullptr;
     }
@@ -401,6 +405,14 @@ static bool device_output_enabled() {
     return enabled;
 }
 
+static bool mapped_weight_device_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_MAPPED_WEIGHTS");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 static bool fast_gemv_enabled_for_device_weights() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_FAST_GEMV");
@@ -412,7 +424,9 @@ static bool fast_gemv_enabled_for_device_weights() {
 static int device_layer_limit() {
     static const int limit = [] {
         const char* v = getenv("JLLM_DEVICE_LAYERS");
-        if (!v) return -1;  // auto
+        if (!v) {
+            return mapped_weight_device_enabled() ? 0 : -1;
+        }
         int n = atoi(v);
         return n < 0 ? -1 : n;
     }();
@@ -483,7 +497,11 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
     }
 
     owned.push_back(output_device);
+    const bool tied_output = (mw.output == mw.tok_embd);
     mw.output = output_device;
+    if (tied_output && fast_embedding_enabled()) {
+        mw.tok_embd = output_device;
+    }
     fprintf(stderr,
             "[model] Materialized output projection on device (%zu MB)\n",
             bytes / (1024 * 1024));
@@ -617,7 +635,9 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
         fprintf(stderr, "[engine] Failed to materialize norm weights\n");
         return false;
     }
-    budget_.model_mb = weights_size_ / (1024 * 1024);
+    budget_.model_mb = mapped_weight_device_enabled()
+        ? weights_size_ / (1024 * 1024)
+        : 0;
 
     int kv_bytes = params.kv_int8 ? 1 : 2;
     int auto_ctx = budget_.max_context(config_.n_layers, config_.n_kv_heads, config_.head_dim, kv_bytes);
@@ -681,6 +701,10 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
         materialize_layer_weights(model_weights_, config_, budget_,
                                   device_weight_copies_);
     budget_.model_mb += layer_device_bytes / (1024 * 1024);
+
+    if (!mapped_weight_device_enabled() && weights_) {
+        madvise(weights_, weights_size_, MADV_DONTNEED);
+    }
 
     cudaStreamCreate(&stream_);
     tokenizer_.load_from_gguf(gguf_path);
