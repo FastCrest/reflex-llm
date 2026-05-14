@@ -33,6 +33,14 @@ static bool debug_kernels_enabled() {
     return enabled;
 }
 
+static bool profile_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_PROFILE");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 // ── Vector add kernel (for residual connections) ─────────────────────────
 // BUG #2 fix: need explicit residual add between stages
 
@@ -665,6 +673,13 @@ void Engine::transformer_layer(int layer, int pos, half* x) {
 
 int Engine::decode_step(int pos) {
     int H = config_.hidden_dim;
+    const bool profile = profile_enabled();
+    auto prof_t = Clock::now();
+    float prof_emb_ms = 0.0f;
+    float prof_layers_ms = 0.0f;
+    float prof_norm_ms = 0.0f;
+    float prof_logits_ms = 0.0f;
+    float prof_sample_ms = 0.0f;
 
     half* x = (half*)scratch_.get(H * sizeof(half));
 
@@ -672,15 +687,33 @@ int Engine::decode_step(int pos) {
     // token_embd is typically Q4_K (type 12) or Q6_K (type 14) in GGUF
     dequant_embedding(x, model_weights_.tok_embd, last_token_, H,
                       model_weights_.embd_type, stream_);
+    if (profile) {
+        cudaStreamSynchronize(stream_);
+        auto now = Clock::now();
+        prof_emb_ms = Ms(now - prof_t).count();
+        prof_t = now;
+    }
 
     // All transformer layers
     for (int l = 0; l < config_.n_layers; l++) {
         transformer_layer(l, pos, x);
     }
+    if (profile) {
+        cudaStreamSynchronize(stream_);
+        auto now = Clock::now();
+        prof_layers_ms = Ms(now - prof_t).count();
+        prof_t = now;
+    }
 
     // Final RMSNorm
     half* normed = (half*)scratch_.get(H * sizeof(half));
     fused_rmsnorm_residual(normed, x, nullptr, model_weights_.output_norm, 1, H, config_.rms_eps, true, stream_);
+    if (profile) {
+        cudaStreamSynchronize(stream_);
+        auto now = Clock::now();
+        prof_norm_ms = Ms(now - prof_t).count();
+        prof_t = now;
+    }
 
     // Logits: reuse scratch for the FP16 projection and FP32 conversion. This
     // avoids a cudaMalloc/cudaFree pair in the decode loop for every token.
@@ -709,10 +742,43 @@ int Engine::decode_step(int pos) {
                 cudaGetErrorString(copy_err));
         return tokenizer_.eos_id;
     }
+    if (profile) {
+        auto now = Clock::now();
+        prof_logits_ms = Ms(now - prof_t).count();
+        prof_t = now;
+    }
 
     // Sample
     int token = sample_token(host_logits_, config_.vocab_size, gen_params_,
                              recent_tokens_.data(), recent_tokens_.size());
+    if (profile) {
+        auto now = Clock::now();
+        prof_sample_ms = Ms(now - prof_t).count();
+
+        static int prof_count = 0;
+        static double acc_emb = 0.0;
+        static double acc_layers = 0.0;
+        static double acc_norm = 0.0;
+        static double acc_logits = 0.0;
+        static double acc_sample = 0.0;
+
+        prof_count++;
+        acc_emb += prof_emb_ms;
+        acc_layers += prof_layers_ms;
+        acc_norm += prof_norm_ms;
+        acc_logits += prof_logits_ms;
+        acc_sample += prof_sample_ms;
+        const double total = prof_emb_ms + prof_layers_ms + prof_norm_ms +
+                             prof_logits_ms + prof_sample_ms;
+        const double avg_total = (acc_emb + acc_layers + acc_norm +
+                                  acc_logits + acc_sample) / prof_count;
+        fprintf(stderr,
+                "[profile] token=%d total=%.2f ms emb=%.2f layers=%.2f final_norm=%.2f logits=%.2f sample=%.2f "
+                "avg_total=%.2f avg_layers=%.2f avg_logits=%.2f\n",
+                prof_count, total, prof_emb_ms, prof_layers_ms, prof_norm_ms,
+                prof_logits_ms, prof_sample_ms,
+                avg_total, acc_layers / prof_count, acc_logits / prof_count);
+    }
 
     recent_tokens_.push_back(token);
     if ((int)recent_tokens_.size() > 64) recent_tokens_.erase(recent_tokens_.begin());

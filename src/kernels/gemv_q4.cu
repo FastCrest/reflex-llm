@@ -419,6 +419,98 @@ __global__ void gemv_quant_triple_kernel(
         y[local_row] = __float2half(acc);
 }
 
+template<int Type>
+__device__ __forceinline__ float dot_quant_row_t(
+    const void* __restrict__ W,
+    int row,
+    int n_blocks,
+    const half* __restrict__ x,
+    int lane)
+{
+    if constexpr (Type == 12) {
+        return dot_q4k_row((const block_q4_K*)W + (int64_t)row * n_blocks,
+                           x, n_blocks, lane);
+    } else if constexpr (Type == 13) {
+        return dot_q5k_row((const block_q5_K*)W + (int64_t)row * n_blocks,
+                           x, n_blocks, lane);
+    } else if constexpr (Type == 14) {
+        return dot_q6k_row((const block_q6_K*)W + (int64_t)row * n_blocks,
+                           x, n_blocks, lane);
+    } else {
+        return 0.0f;
+    }
+}
+
+template<int Type0, int Type1>
+__global__ void gemv_quant_pair_typed_kernel(
+    half*        __restrict__ y0,
+    const void*  __restrict__ W0,
+    int M0,
+    half*        __restrict__ y1,
+    const void*  __restrict__ W1,
+    int M1,
+    const half*  __restrict__ x,
+    int K,
+    int rows_per_block)
+{
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int total_M = M0 + M1;
+    if (row >= total_M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc;
+    if (row < M0) {
+        acc = dot_quant_row_t<Type0>(W0, row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y0[row] = __float2half(acc);
+    } else {
+        const int local_row = row - M0;
+        acc = dot_quant_row_t<Type1>(W1, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y1[local_row] = __float2half(acc);
+    }
+}
+
+template<int Type0, int Type1, int Type2>
+__global__ void gemv_quant_triple_typed_kernel(
+    half*        __restrict__ y0,
+    const void*  __restrict__ W0,
+    int M0,
+    half*        __restrict__ y1,
+    const void*  __restrict__ W1,
+    int M1,
+    half*        __restrict__ y2,
+    const void*  __restrict__ W2,
+    int M2,
+    const half*  __restrict__ x,
+    int K,
+    int rows_per_block)
+{
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    const int total_M = M0 + M1 + M2;
+    if (row >= total_M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc;
+    if (row < M0) {
+        acc = dot_quant_row_t<Type0>(W0, row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y0[row] = __float2half(acc);
+    } else if (row < M0 + M1) {
+        const int local_row = row - M0;
+        acc = dot_quant_row_t<Type1>(W1, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y1[local_row] = __float2half(acc);
+    } else {
+        const int local_row = row - M0 - M1;
+        acc = dot_quant_row_t<Type2>(W2, local_row, n_blocks, x, lane);
+        acc = warp_reduce_sum(acc);
+        if (lane == 0) y2[local_row] = __float2half(acc);
+    }
+}
+
 // Debug kernel: print first few output values
 __global__ void debug_print_half(const half* data, int n, const char* label) {
     if (threadIdx.x == 0 && blockIdx.x == 0) {
@@ -501,10 +593,15 @@ static bool gemv_quant_pair_gpu(
     const int block = rows_per_block * 32;
     const int grid = (M0 + M1 + rows_per_block - 1) / rows_per_block;
 
-    gemv_quant_pair_kernel<<<grid, block, 0, stream>>>(
-        y0, W0_device, type0, M0,
-        y1, W1_device, type1, M1,
-        x, K, rows_per_block);
+    if (type0 == 12 && type1 == 12) {
+        gemv_quant_pair_typed_kernel<12, 12><<<grid, block, 0, stream>>>(
+            y0, W0_device, M0, y1, W1_device, M1, x, K, rows_per_block);
+    } else {
+        gemv_quant_pair_kernel<<<grid, block, 0, stream>>>(
+            y0, W0_device, type0, M0,
+            y1, W1_device, type1, M1,
+            x, K, rows_per_block);
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
@@ -533,11 +630,21 @@ static bool gemv_quant_triple_gpu(
     const int block = rows_per_block * 32;
     const int grid = (M0 + M1 + M2 + rows_per_block - 1) / rows_per_block;
 
-    gemv_quant_triple_kernel<<<grid, block, 0, stream>>>(
-        y0, W0_device, type0, M0,
-        y1, W1_device, type1, M1,
-        y2, W2_device, type2, M2,
-        x, K, rows_per_block);
+    if (type0 == 12 && type1 == 12 && type2 == 14) {
+        gemv_quant_triple_typed_kernel<12, 12, 14><<<grid, block, 0, stream>>>(
+            y0, W0_device, M0, y1, W1_device, M1, y2, W2_device, M2,
+            x, K, rows_per_block);
+    } else if (type0 == 12 && type1 == 12 && type2 == 12) {
+        gemv_quant_triple_typed_kernel<12, 12, 12><<<grid, block, 0, stream>>>(
+            y0, W0_device, M0, y1, W1_device, M1, y2, W2_device, M2,
+            x, K, rows_per_block);
+    } else {
+        gemv_quant_triple_kernel<<<grid, block, 0, stream>>>(
+            y0, W0_device, type0, M0,
+            y1, W1_device, type1, M1,
+            y2, W2_device, type2, M2,
+            x, K, rows_per_block);
+    }
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {

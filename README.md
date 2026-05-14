@@ -114,6 +114,7 @@ JLLM_FAST_ATTN=0  # use CPU reference decode attention
 JLLM_FAST_SAMPLE=0  # use full-vocab reference sampling path
 JLLM_DEVICE_OUTPUT=0  # keep tied output projection on mapped host memory
 JLLM_GEMV_ROWS=4  # use the previous 4-row GEMV launch shape (default: 8)
+JLLM_PROFILE=1  # print per-token decode timing breakdown
 JLLM_DEBUG_KERNELS=1  # print first-token kernel diagnostics
 ```
 
