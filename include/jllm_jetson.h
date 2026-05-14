@@ -12,10 +12,10 @@ namespace jllm {
 // ── Power mode ───────────────────────────────────────────────────────────
 
 enum PowerMode {
-    POWER_MAXN = 0,   // 25W — full performance
+    POWER_MAXN = 0,   // highest-power profile; exact nvpmodel id is board-specific
     POWER_15W  = 1,
     POWER_10W  = 2,
-    POWER_7W   = 3,   // minimum — battery / fanless
+    POWER_7W   = 3,
     POWER_UNKNOWN = -1
 };
 

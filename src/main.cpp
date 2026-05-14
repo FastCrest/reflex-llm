@@ -131,8 +131,14 @@ int main(int argc, char** argv) {
     jllm::print_jetson_info(info);
 
     auto power = jllm::read_power_state();
-    fprintf(stderr, "Power: %dW mode, GPU @ %d MHz, %d CPUs online\n",
-            power.watts, power.gpu_freq_mhz, power.cpu_online);
+    if (power.watts > 0) {
+        fprintf(stderr, "Power: %dW mode, GPU @ %d/%d MHz, %d CPUs online\n",
+                power.watts, power.gpu_freq_mhz, power.gpu_freq_max_mhz,
+                power.cpu_online);
+    } else {
+        fprintf(stderr, "Power: unknown mode, GPU @ %d/%d MHz, %d CPUs online\n",
+                power.gpu_freq_mhz, power.gpu_freq_max_mhz, power.cpu_online);
+    }
 
     auto budget = jllm::probe_system_memory();
     budget.print();

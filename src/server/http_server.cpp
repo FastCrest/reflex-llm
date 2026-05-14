@@ -93,13 +93,13 @@ static std::string build_health_json(Engine& engine) {
         "\"model\":\"%s\","
         "\"memory\":{\"total_mb\":%ld,\"free_mb\":%ld,\"model_mb\":%ld,\"kv_mb\":%ld},"
         "\"thermal\":{\"gpu_c\":%.1f,\"cpu_c\":%.1f,\"throttling\":%s},"
-        "\"power\":{\"mode\":\"%dW\",\"gpu_mhz\":%d},"
+        "\"power\":{\"mode\":\"%dW\",\"gpu_mhz\":%d,\"gpu_max_mhz\":%d},"
         "\"gpu_util_pct\":%d"
         "}",
         engine.config().name.c_str(),
         budget.total_mb, budget.free_mb(), budget.model_mb, budget.kv_cache_mb,
         ts.gpu_temp_c, ts.cpu_temp_c, ts.throttling ? "true" : "false",
-        ps.watts, ps.gpu_freq_mhz,
+        ps.watts, ps.gpu_freq_mhz, ps.gpu_freq_max_mhz,
         ls.gpu_util_pct);
     return buf;
 }
