@@ -24,7 +24,7 @@ static constexpr int ATTN_BLOCK   = 128;
 static bool fast_attention_enabled() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_FAST_ATTN");
-        return v && strcmp(v, "0") != 0;
+        return !v || strcmp(v, "0") != 0;
     }();
     return enabled;
 }

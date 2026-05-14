@@ -14,7 +14,7 @@ namespace jllm {
 static bool fast_norm_enabled() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_FAST_NORM");
-        return v && strcmp(v, "0") != 0;
+        return !v || strcmp(v, "0") != 0;
     }();
     return enabled;
 }

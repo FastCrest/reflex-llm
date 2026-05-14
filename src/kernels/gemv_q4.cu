@@ -23,7 +23,7 @@ static bool debug_kernels_enabled() {
 static bool fast_gemv_enabled() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_FAST_GEMV");
-        return v && strcmp(v, "0") != 0;
+        return !v || strcmp(v, "0") != 0;
     }();
     return enabled;
 }
