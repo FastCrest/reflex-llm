@@ -22,6 +22,14 @@ static int read_sysfs_mhz(const char* path, int divisor) {
     return val >= 0 ? val / divisor : -1;
 }
 
+static int read_first_sysfs_mhz(const char* const* paths, int divisor) {
+    for (int i = 0; paths[i]; ++i) {
+        int mhz = read_sysfs_mhz(paths[i], divisor);
+        if (mhz >= 0) return mhz;
+    }
+    return -1;
+}
+
 static int parse_watts_from_line(const char* line) {
     for (const char* p = line; *p; ++p) {
         if (!isdigit((unsigned char)*p)) continue;
@@ -88,11 +96,28 @@ PowerState read_power_state() {
     ps.mode = POWER_UNKNOWN;
     ps.watts = -1;
 
+    static const char* gpu_cur_freq_paths[] = {
+        "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq",
+        "/sys/devices/platform/17000000.ga10b/devfreq/17000000.ga10b/cur_freq",
+        "/sys/devices/platform/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+        "/sys/devices/platform/bus@0/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+        "/sys/devices/platform/host1x/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+        "/sys/devices/gpu.0/devfreq/17000000.gp10b/cur_freq",
+        nullptr
+    };
+    static const char* gpu_max_freq_paths[] = {
+        "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/max_freq",
+        "/sys/devices/platform/17000000.ga10b/devfreq/17000000.ga10b/max_freq",
+        "/sys/devices/platform/17000000.gpu/devfreq/17000000.gpu/max_freq",
+        "/sys/devices/platform/bus@0/17000000.gpu/devfreq/17000000.gpu/max_freq",
+        "/sys/devices/platform/host1x/17000000.gpu/devfreq/17000000.gpu/max_freq",
+        "/sys/devices/gpu.0/devfreq/17000000.gp10b/max_freq",
+        nullptr
+    };
+
     // GPU frequency
-    ps.gpu_freq_mhz = read_sysfs_mhz(
-        "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq", 1000000);
-    ps.gpu_freq_max_mhz = read_sysfs_mhz(
-        "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/max_freq", 1000000);
+    ps.gpu_freq_mhz = read_first_sysfs_mhz(gpu_cur_freq_paths, 1000000);
+    ps.gpu_freq_max_mhz = read_first_sysfs_mhz(gpu_max_freq_paths, 1000000);
 
     // EMC (memory controller) frequency
     ps.emc_freq_mhz = read_sysfs_mhz(

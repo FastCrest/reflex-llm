@@ -12,12 +12,22 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <vector>
 
 namespace jllm {
 
 static constexpr int ATTN_TILE_KV = 64;
 static constexpr int ATTN_BLOCK   = 128;
+
+static bool fast_attention_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_ATTN");
+        return v && strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
 
 // Each thread handles ceil(head_dim / blockDim.x) output dimensions.
 // Accumulators stored in shared memory (visible to all threads in block).
@@ -33,6 +43,7 @@ __global__ void flash_attention_decode_kernel(
     const int head = blockIdx.x;
     const int kv_head = head / (n_heads / n_kv_heads);  // GQA
     const int tid = threadIdx.x;
+    const int kv_dim = n_kv_heads * head_dim;
 
     // Shared memory layout:
     //   s_scores[ATTN_TILE_KV]     — attention scores for current KV tile
@@ -41,16 +52,19 @@ __global__ void flash_attention_decode_kernel(
     float* s_scores = smem;
     float* s_out    = smem + ATTN_TILE_KV;
 
+    __shared__ float s_running_max;
+    __shared__ float s_running_sum;
+    __shared__ float s_correction;
+
     // Initialize output accumulator to zero
     for (int d = tid; d < head_dim; d += blockDim.x)
         s_out[d] = 0.0f;
+    if (tid == 0) {
+        s_running_max = -FLT_MAX;
+        s_running_sum = 0.0f;
+        s_correction = 1.0f;
+    }
     __syncthreads();
-
-    // Q is read directly from global memory in the dot product loop below.
-    // (No register pre-load needed — Q is small and stays in L1 cache.)
-
-    float running_max = -FLT_MAX;
-    float running_sum = 0.0f;
 
     // Tile over KV sequence
     for (int kv_start = 0; kv_start < seq_len; kv_start += ATTN_TILE_KV) {
@@ -67,10 +81,11 @@ __global__ void flash_attention_decode_kernel(
                 if (kv_int8) {
                     const int8_t* ki = (const int8_t*)k_cache;
                     float ks = kv_scales ? kv_scales[kv_head] : 1.0f;
-                    k_val = ki[(int64_t)kv_head * seq_len * head_dim + kv_pos * head_dim + d] * ks;
+                    k_val = ki[(int64_t)kv_pos * kv_dim + kv_head * head_dim + d] * ks;
                 } else {
                     const half* kf = (const half*)k_cache;
-                    k_val = __half2float(kf[(int64_t)kv_head * seq_len * head_dim + kv_pos * head_dim + d]);
+                    k_val = __half2float(
+                        kf[(int64_t)kv_pos * kv_dim + kv_head * head_dim + d]);
                 }
                 dot += q_val * k_val;
             }
@@ -79,52 +94,35 @@ __global__ void flash_attention_decode_kernel(
         __syncthreads();
 
         // ── Step 2: Online softmax ──────────────────────────────
-        float tile_max = -FLT_MAX;
-        for (int t = tid; t < tile_len; t += blockDim.x)
-            tile_max = fmaxf(tile_max, s_scores[t]);
+        if (tid == 0) {
+            float tile_max = -FLT_MAX;
+            for (int t = 0; t < tile_len; ++t) {
+                tile_max = fmaxf(tile_max, s_scores[t]);
+            }
 
-        // Reduce max across block
-        #pragma unroll
-        for (int off = 16; off > 0; off >>= 1)
-            tile_max = fmaxf(tile_max, __shfl_xor_sync(0xFFFFFFFF, tile_max, off));
-
-        __shared__ float smax;
-        if (tid == 0) smax = -FLT_MAX;
+            const float old_max = s_running_max;
+            s_running_max = fmaxf(s_running_max, tile_max);
+            s_correction = expf(old_max - s_running_max);
+            s_running_sum *= s_correction;
+        }
         __syncthreads();
-        if (tid % 32 == 0) atomicMax((int*)&smax, __float_as_int(tile_max));
-        __syncthreads();
-        tile_max = smax;
-
-        // Correction factor for running max update
-        float old_max = running_max;
-        running_max = fmaxf(running_max, tile_max);
-        float correction = expf(old_max - running_max);
 
         // Correct existing accumulators
-        running_sum *= correction;
         for (int d = tid; d < head_dim; d += blockDim.x)
-            s_out[d] *= correction;
+            s_out[d] *= s_correction;
         __syncthreads();
 
         // Exponentiate scores
-        float tile_sum = 0.0f;
-        for (int t = tid; t < tile_len; t += blockDim.x) {
-            float p = expf(s_scores[t] - running_max);
-            s_scores[t] = p;
-            tile_sum += p;
+        if (tid == 0) {
+            float tile_sum = 0.0f;
+            for (int t = 0; t < tile_len; ++t) {
+                float p = expf(s_scores[t] - s_running_max);
+                s_scores[t] = p;
+                tile_sum += p;
+            }
+            s_running_sum += tile_sum;
         }
-
-        // Reduce sum
-        #pragma unroll
-        for (int off = 16; off > 0; off >>= 1)
-            tile_sum += __shfl_xor_sync(0xFFFFFFFF, tile_sum, off);
-
-        __shared__ float ssum;
-        if (tid == 0) ssum = 0.0f;
         __syncthreads();
-        if (tid % 32 == 0) atomicAdd(&ssum, tile_sum);
-        __syncthreads();
-        running_sum += ssum;
 
         // ── Step 3: Accumulate P × V (BUG #6 FIX — per-dimension) ──
         // Each thread handles its slice of head_dim
@@ -136,10 +134,11 @@ __global__ void flash_attention_decode_kernel(
                 if (kv_int8) {
                     const int8_t* vi = (const int8_t*)v_cache;
                     float vs = kv_scales ? kv_scales[n_kv_heads + kv_head] : 1.0f;
-                    v_val = vi[(int64_t)kv_head * seq_len * head_dim + kv_pos * head_dim + d] * vs;
+                    v_val = vi[(int64_t)kv_pos * kv_dim + kv_head * head_dim + d] * vs;
                 } else {
                     const half* vf = (const half*)v_cache;
-                    v_val = __half2float(vf[(int64_t)kv_head * seq_len * head_dim + kv_pos * head_dim + d]);
+                    v_val = __half2float(
+                        vf[(int64_t)kv_pos * kv_dim + kv_head * head_dim + d]);
                 }
                 val += s_scores[t] * v_val;
             }
@@ -149,7 +148,7 @@ __global__ void flash_attention_decode_kernel(
     }
 
     // ── Finalize: normalize and write output ─────────────────────
-    float inv_sum = (running_sum > 0.0f) ? 1.0f / running_sum : 0.0f;
+    float inv_sum = (s_running_sum > 0.0f) ? 1.0f / s_running_sum : 0.0f;
     for (int d = tid; d < head_dim; d += blockDim.x) {
         output[head * head_dim + d] = __float2half(s_out[d] * inv_sum);
     }
@@ -160,11 +159,26 @@ void flash_attention_decode(
     int n_heads, int n_kv_heads, int head_dim, int seq_len,
     float scale, bool kv_int8, const float* kv_scales, cudaStream_t stream)
 {
-    // Reference path while validating the model graph. The KV cache writer stores
-    // entries as [position][kv_head][head_dim], not [kv_head][position][head_dim].
-    // The CUDA kernel above used the latter layout, which reads wrong keys/values
-    // as soon as seq_len > 1 and poisons the residual stream.
-    (void)kv_scales;
+    if (fast_attention_enabled()) {
+        static bool logged = false;
+        if (!logged) {
+            fprintf(stderr, "[attention] Using CUDA decode attention path\n");
+            logged = true;
+        }
+
+        const int smem = (ATTN_TILE_KV + head_dim) * (int)sizeof(float);
+        flash_attention_decode_kernel<<<n_heads, ATTN_BLOCK, smem, stream>>>(
+            output, q, k_cache, v_cache, n_heads, n_kv_heads, head_dim,
+            seq_len, scale, kv_int8, kv_scales);
+
+        cudaError_t err = cudaGetLastError();
+        if (err == cudaSuccess) {
+            return;
+        }
+        fprintf(stderr, "[attention] CUDA attention launch failed: %s; falling back to CPU reference\n",
+                cudaGetErrorString(err));
+    }
+
     cudaStreamSynchronize(stream);
 
     if (kv_int8) {

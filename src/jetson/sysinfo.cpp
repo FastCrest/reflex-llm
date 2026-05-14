@@ -8,6 +8,48 @@
 
 namespace jllm {
 
+static int read_sysfs_int(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    int val = -1;
+    fscanf(f, "%d", &val);
+    fclose(f);
+    return val;
+}
+
+static int read_first_sysfs_int(const char* const* paths) {
+    for (int i = 0; paths[i]; ++i) {
+        int val = read_sysfs_int(paths[i]);
+        if (val >= 0) return val;
+    }
+    return -1;
+}
+
+static int read_first_sysfs_mhz(const char* const* paths, int divisor) {
+    int val = read_first_sysfs_int(paths);
+    return val >= 0 ? val / divisor : 0;
+}
+
+static const char* gpu_load_paths[] = {
+    "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/load",
+    "/sys/devices/platform/17000000.ga10b/devfreq/17000000.ga10b/load",
+    "/sys/devices/platform/17000000.gpu/devfreq/17000000.gpu/load",
+    "/sys/devices/platform/bus@0/17000000.gpu/devfreq/17000000.gpu/load",
+    "/sys/devices/platform/host1x/17000000.gpu/devfreq/17000000.gpu/load",
+    "/sys/devices/gpu.0/devfreq/17000000.gp10b/load",
+    nullptr
+};
+
+static const char* gpu_cur_freq_paths[] = {
+    "/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq",
+    "/sys/devices/platform/17000000.ga10b/devfreq/17000000.ga10b/cur_freq",
+    "/sys/devices/platform/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+    "/sys/devices/platform/bus@0/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+    "/sys/devices/platform/host1x/17000000.gpu/devfreq/17000000.gpu/cur_freq",
+    "/sys/devices/gpu.0/devfreq/17000000.gp10b/cur_freq",
+    nullptr
+};
+
 JetsonInfo probe_jetson() {
     JetsonInfo info = {};
 
@@ -95,12 +137,11 @@ LiveStats read_live_stats() {
     }
 
     // GPU utilization from devfreq load
-    f = fopen("/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/load", "r");
-    if (f) { fscanf(f, "%d", &s.gpu_util_pct); fclose(f); }
+    s.gpu_util_pct = read_first_sysfs_int(gpu_load_paths);
+    if (s.gpu_util_pct < 0) s.gpu_util_pct = 0;
 
     // GPU frequency
-    f = fopen("/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq", "r");
-    if (f) { long freq; fscanf(f, "%ld", &freq); s.gpu_freq_mhz = freq / 1000000; fclose(f); }
+    s.gpu_freq_mhz = read_first_sysfs_mhz(gpu_cur_freq_paths, 1000000);
 
     // Temperature
     auto ts = read_thermal();
