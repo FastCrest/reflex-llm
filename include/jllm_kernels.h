@@ -118,6 +118,17 @@ void gemv_quant_f32(
     cudaStream_t   stream
 );
 
+// Dequantize one token embedding row directly on the GPU. Supports the same
+// GGML K-quant formats used by token_embd.weight in Q*_K_M GGUF files.
+bool dequant_embedding_row(
+    half*          dst,
+    const void*    W,
+    int            ggml_type,
+    int            token_id,
+    int            hidden_dim,
+    cudaStream_t   stream
+);
+
 // ── Fused RMSNorm + Residual Add ────────────────────────────────────────
 // input = RMSNorm(x + residual) * weight
 // One read of x, one read of residual, one write of output.

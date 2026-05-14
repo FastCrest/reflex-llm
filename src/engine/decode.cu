@@ -41,6 +41,14 @@ static bool profile_enabled() {
     return enabled;
 }
 
+static bool fast_embedding_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_FAST_EMBD");
+        return !v || strcmp(v, "0") != 0;
+    }();
+    return enabled;
+}
+
 // ── Vector add kernel (for residual connections) ─────────────────────────
 // BUG #2 fix: need explicit residual add between stages
 
@@ -205,6 +213,25 @@ static void dequant_q6k_row(float* out, const void* data, int token_id, int hidd
 
 static void dequant_embedding(half* dst, const void* embd_data, int token_id,
                                int hidden_dim, int embd_type, cudaStream_t stream) {
+    if (fast_embedding_enabled() && (embd_type == 12 || embd_type == 14) &&
+        dequant_embedding_row(dst, embd_data, embd_type, token_id, hidden_dim, stream)) {
+        static bool first_q4 = true;
+        static bool first_q6 = true;
+        bool& first = (embd_type == 12) ? first_q4 : first_q6;
+        if (first && debug_kernels_enabled()) {
+            cudaStreamSynchronize(stream);
+            half h_dbg[8];
+            cudaMemcpy(h_dbg, dst, sizeof(h_dbg), cudaMemcpyDeviceToHost);
+            fprintf(stderr, "[embd] Q%d_K GPU dequant token %d, first 8 values: ",
+                    embd_type == 12 ? 4 : 6, token_id);
+            for (int i = 0; i < 8 && i < hidden_dim; i++)
+                fprintf(stderr, "%.4f ", __half2float(h_dbg[i]));
+            fprintf(stderr, "\n");
+        }
+        first = false;
+        return;
+    }
+
     float h_row[8192];  // max hidden_dim = 8192
     half  h_fp16[8192];
 

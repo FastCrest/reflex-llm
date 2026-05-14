@@ -38,6 +38,7 @@ Validated fast paths are now default:
 | Path | Runtime switch to disable |
 |------|---------------------------|
 | K-quant GEMV | `JLLM_FAST_GEMV=0` |
+| Token embedding dequantization | `JLLM_FAST_EMBD=0` |
 | RMSNorm | `JLLM_FAST_NORM=0` |
 | Decode attention | `JLLM_FAST_ATTN=0` |
 

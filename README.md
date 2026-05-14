@@ -109,6 +109,7 @@ for debugging:
 
 ```
 JLLM_FAST_GEMV=0  # use CPU reference K-quant GEMV
+JLLM_FAST_EMBD=0  # use CPU reference token embedding dequantization
 JLLM_FAST_NORM=0  # use CPU reference RMSNorm
 JLLM_FAST_ATTN=0  # use CPU reference decode attention
 JLLM_FAST_SAMPLE=0  # use full-vocab reference sampling path

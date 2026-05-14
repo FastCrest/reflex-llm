@@ -34,6 +34,7 @@ Fast CUDA paths are enabled by default:
 | Path | Default | Fallback |
 |------|---------|----------|
 | K-quant GEMV | CUDA | `JLLM_FAST_GEMV=0` |
+| Token embedding dequantization | CUDA | `JLLM_FAST_EMBD=0` |
 | RMSNorm | CUDA | `JLLM_FAST_NORM=0` |
 | Decode attention | CUDA | `JLLM_FAST_ATTN=0` |
 

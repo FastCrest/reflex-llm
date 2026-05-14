@@ -382,6 +382,79 @@ __global__ void gemv_q6k_f32_kernel(
         y[row] = acc;
 }
 
+__global__ void dequant_embedding_q4k_kernel(
+    half*              __restrict__ dst,
+    const block_q4_K*  __restrict__ W,
+    int token_id,
+    int hidden_dim)
+{
+    const int block_id = blockIdx.x;
+    const int i = threadIdx.x;
+    if (i >= QK_K) return;
+
+    const int blocks_per_row = hidden_dim / QK_K;
+    const block_q4_K& blk = W[(int64_t)token_id * blocks_per_row + block_id];
+    const float dall = raw_fp16_to_float(blk.d_raw);
+    const float dmin = raw_fp16_to_float(blk.dmin_raw);
+
+    const int il = i >> 6;
+    const int lane64 = i & 63;
+    const int lane32 = lane64 & 31;
+    const int is = 2 * il + (lane64 >= 32);
+
+    uint8_t sc, mn;
+    get_scale_min_k4(is, blk.scales, sc, mn);
+
+    const uint8_t q = blk.qs[32 * il + lane32];
+    const int qv = (lane64 < 32) ? (q & 0x0F) : (q >> 4);
+    const float val = dall * (float)sc * (float)qv - dmin * (float)mn;
+    dst[block_id * QK_K + i] = __float2half(val);
+}
+
+__global__ void dequant_embedding_q6k_kernel(
+    half*              __restrict__ dst,
+    const block_q6_K*  __restrict__ W,
+    int token_id,
+    int hidden_dim)
+{
+    const int block_id = blockIdx.x;
+    const int i = threadIdx.x;
+    if (i >= QK_K) return;
+
+    const int blocks_per_row = hidden_dim / QK_K;
+    const block_q6_K& blk = W[(int64_t)token_id * blocks_per_row + block_id];
+    const float d = raw_fp16_to_float(blk.d_raw);
+
+    const int half_block = i >> 7;
+    const int local = i & 127;
+    const int lane = local & 31;
+    const int quarter = local >> 5;
+
+    const uint8_t* ql = blk.ql + half_block * 64;
+    const uint8_t* qh = blk.qh + half_block * 32;
+    const int8_t* sc = blk.scales + half_block * 8;
+    const int is = lane >> 4;
+
+    int qv;
+    int scale;
+    if (quarter == 0) {
+        qv = (int)(ql[lane] & 0x0F) | (((int)(qh[lane] >> 0) & 3) << 4);
+        scale = sc[is + 0];
+    } else if (quarter == 1) {
+        qv = (int)(ql[lane + 32] & 0x0F) | (((int)(qh[lane] >> 2) & 3) << 4);
+        scale = sc[is + 2];
+    } else if (quarter == 2) {
+        qv = (int)(ql[lane] >> 4) | (((int)(qh[lane] >> 4) & 3) << 4);
+        scale = sc[is + 4];
+    } else {
+        qv = (int)(ql[lane + 32] >> 4) | (((int)(qh[lane] >> 6) & 3) << 4);
+        scale = sc[is + 6];
+    }
+
+    const float val = d * (float)scale * (float)(qv - 32);
+    dst[block_id * QK_K + i] = __float2half(val);
+}
+
 __global__ void gemv_quant_pair_kernel(
     half*        __restrict__ y0,
     const void*  __restrict__ W0,
@@ -972,6 +1045,40 @@ void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
     }
 
     cudaMemcpy(y, h_y.data(), M * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+bool dequant_embedding_row(half* dst, const void* W, int ggml_type,
+                           int token_id, int hidden_dim, cudaStream_t stream) {
+    if (hidden_dim <= 0 || hidden_dim % QK_K != 0) {
+        return false;
+    }
+
+    const void* W_device = resolve_weight_device_ptr(W);
+    if (!W_device) {
+        return false;
+    }
+
+    const int blocks = hidden_dim / QK_K;
+    switch (ggml_type) {
+        case 12:
+            dequant_embedding_q4k_kernel<<<blocks, QK_K, 0, stream>>>(
+                dst, (const block_q4_K*)W_device, token_id, hidden_dim);
+            break;
+        case 14:
+            dequant_embedding_q6k_kernel<<<blocks, QK_K, 0, stream>>>(
+                dst, (const block_q6_K*)W_device, token_id, hidden_dim);
+            break;
+        default:
+            return false;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[embd] GPU dequant launch failed: %s\n",
+                cudaGetErrorString(err));
+        return false;
+    }
+    return true;
 }
 
 }  // namespace jllm

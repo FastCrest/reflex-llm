@@ -10,6 +10,7 @@ can be disabled independently for debugging:
 
 ```
 JLLM_FAST_GEMV=0
+JLLM_FAST_EMBD=0
 JLLM_FAST_NORM=0
 JLLM_FAST_ATTN=0
 ```
