@@ -145,14 +145,17 @@ After reset():          [──────────────────�
 
 - `get(size)` — returns pointer, advances offset. Aligns to 256 bytes.
 - `reset()` — resets offset to 0. Called at start of each decode step.
-- Zero `malloc`/`free` during inference — just pointer arithmetic.
+- Most decode buffers use this bump allocator. The current final-logits
+  fast path still uses a temporary CUDA allocation internally and is tracked
+  as remaining optimization work.
 
 ### Sizing
 
 Scratch size is calculated at load time:
 ```
 scratch = hidden_dim × 8 (attention intermediates)
-        + n_heads × head_dim × 3 (Q, K, V projections)
+        + q_dim × 2 (Q and attention output)
+        + kv_dim × 2 (K and V projections)
         + intermediate_dim × 4 (FFN intermediates)
         + vocab_size × sizeof(float) + vocab_size × sizeof(half) (logits)
         minimum 64 MB
@@ -168,8 +171,9 @@ File on disk (GGUF)
       ▼ mmap(PROT_READ, MAP_PRIVATE)
 DRAM pages (copy-on-write, demand-paged)
       │
-      ▼ cudaHostRegister(ptr, size, cudaHostRegisterReadOnly)
-GPU can read these pages directly (no copy, no page faults)
+      ▼ cudaHostRegister(ptr, size, cudaHostRegisterMapped | cudaHostRegisterReadOnly)
+      ▼ cudaHostGetDevicePointer()
+CUDA kernels use the mapped device alias, not the raw CPU mmap pointer
       │
       ▼ madvise(MADV_RANDOM)
 Kernel knows access pattern is random (inference reads scattered weights)

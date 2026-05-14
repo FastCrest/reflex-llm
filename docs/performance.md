@@ -9,10 +9,41 @@
 | Total TOPS | ~77 |
 | Memory | 8 GB LPDDR5 |
 | Bandwidth | 102 GB/s |
-| CUDA cores | 1024 (16 SMs × 64) |
+| CUDA cores | 1024 (8 SMs × 128) |
 | Tensor Cores | 32 |
 | Power modes | 7W / 10W / 15W / 25W |
 | Ridge point | 0.66 OP/byte |
+
+## Current Validated Result
+
+First coherent on-device validation was completed on Jetson Orin Nano Super
+8 GB, L4T 36.4, CUDA 12.6, 25 W mode, GPU locked at 918 MHz.
+
+Model: `Qwen3-4B-Q4_K_M.gguf` (2381 MB)
+Prompt: `Hello, this is testing.`
+Context: auto-capped to 4096 tokens
+
+| Metric | Result |
+|--------|--------|
+| Prompt tokens | 18 |
+| Prompt eval | 12,377 ms, 1.5 tok/s |
+| Decode tokens | 19 |
+| Decode | 13,109 ms, 1.4 tok/s |
+| Peak memory | 3425 MB |
+| Peak temperature | 50.0°C |
+| Output | `Hello! It seems like you're testing the system. How can I assist you today?` |
+
+Validated fast paths are now default:
+
+| Path | Runtime switch to disable |
+|------|---------------------------|
+| K-quant GEMV | `JLLM_FAST_GEMV=0` |
+| RMSNorm | `JLLM_FAST_NORM=0` |
+| Decode attention | `JLLM_FAST_ATTN=0` |
+
+These numbers are correctness/brings-up numbers, not final throughput targets.
+The largest remaining cost is still K-quant weight bandwidth and the final
+vocabulary projection/sampling path.
 
 ## Why LLM Decode is Bandwidth-Bound
 
@@ -33,7 +64,10 @@ Llama 3.2 3B INT4 — one decode step:
 
 Smaller model = fewer bytes to read = more tokens/sec. Quantization directly translates to throughput.
 
-## Expected Performance
+## Historical Target Estimates
+
+The estimates below are retained as targets from the original roadmap. They
+should not be read as current measured performance.
 
 ### TinyLlama 1.1B (Q4_K_M, 669 MB) — Test Model
 

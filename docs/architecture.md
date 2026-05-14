@@ -73,7 +73,7 @@ User prompt (text)
 ┌─────────────────────────────────────────────────────────────┐
 │              Jetson Orin Nano Super Hardware                  │
 │                                                              │
-│  1024 CUDA cores (16 SMs × 64)  │  102 GB/s LPDDR5         │
+│  1024 CUDA cores (8 SMs × 128)  │  102 GB/s LPDDR5         │
 │  32 Tensor Cores                  │  8 GB unified memory     │
 │  67 TOPS INT8 (GPU)              │  7–25W power modes       │
 │  ~10 TOPS INT8 (DLA)             │  SM 8.7 (Ampere)         │
@@ -93,15 +93,19 @@ On Jetson, CPU and GPU share the same 8 GB LPDDR5. Every byte for the model is a
 
 ### 2. Orin-Only
 
-No code paths for x86, desktop GPUs, or multi-GPU. Every constant, tile size, and thread block is tuned for SM 8.7 with 48 KB shared memory and 16 SMs.
+No code paths for x86, desktop GPUs, or multi-GPU. The default profile is
+tuned for the validated Orin Nano Super SM 8.7 target with 48 KB shared memory
+and 8 SMs, while runtime probes report the actual SKU details at startup.
 
-### 3. Zero Allocation During Inference
+### 3. Pre-Allocated Decode Pools
 
-All memory is pre-allocated at load time:
-- Model weights: mmap'd + pinned (one allocation)
-- KV cache: pre-allocated pool (one allocation)
-- Scratch buffers: bump allocator with pre-allocated backing (one allocation)
-- No `malloc`, `new`, `cudaMalloc` during the decode loop
+Most high-volume memory is prepared at load time:
+- Model weights: mmap'd and CUDA-mapped
+- KV cache: pre-allocated pool
+- Scratch buffers: bump allocator with pre-allocated backing
+
+The current final-logits fast path still has a small temporary CUDA allocation;
+removing that is tracked as throughput cleanup rather than a correctness gate.
 
 ### 4. Unified Memory Exploitation
 

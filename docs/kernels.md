@@ -1,15 +1,33 @@
 # CUDA Kernels
 
-All kernels are tuned for Orin SM 8.7: 48 KB shared memory, 128-thread blocks, 16 SMs.
+All production decode kernels are tuned for Jetson Orin SM 8.7: 48 KB shared
+memory, 128-thread blocks, and the 8-SM Orin Nano Super profile validated on
+L4T R36 / CUDA 12.6. Runtime hardware probing is used for display and sizing;
+the kernels themselves avoid SKU-specific assumptions where possible.
 
-## gemv_q4 — INT4 Dequant-Fused GEMV
+Fast paths are enabled by default after the Week 1 Qwen3 validation. Each path
+can be disabled independently for debugging:
+
+```
+JLLM_FAST_GEMV=0
+JLLM_FAST_NORM=0
+JLLM_FAST_ATTN=0
+```
+
+## gemv_q4 — GGML K-Quant Dequant-Fused GEMV
 
 **File:** `src/kernels/gemv_q4.cu`
-**Time share:** ~38% of decode time — the #1 optimization target.
+**Validated:** Q4_K, Q5_K, Q6_K tensors inside Qwen3-4B Q4_K_M.
 
 ### What it does
 
-Computes `y[M] = W[M×K] × x[K]` where W is 4-bit quantized (2 weights per byte) with FP16 per-group scales.
+Computes `y[M] = W[M×K] × x[K]` where W is a GGML K-quant tensor. Qwen3
+Q4_K_M mixes Q4_K, Q5_K, and Q6_K tensors, so the dispatcher selects the
+matching kernel by GGML tensor type.
+
+Weights stay in the mmap'd GGUF file. The loader registers that mmap with CUDA
+mapped-host access and gives the kernels a device-visible alias; raw CPU mmap
+pointers are never dereferenced by CUDA kernels.
 
 ### Why fused dequant matters
 
@@ -33,17 +51,18 @@ Dequant:   8 INT4 values from one uint32, multiply by group scale
 ### Key code path
 
 ```
-1. Each lane loads W_packed[lane], W_packed[lane+32], ... (coalesced)
-2. Dequantize 8 values per uint32 (shift + mask + scale)
-3. Dot product with x[k0..k0+7] (x stays in L1/L2 cache)
-4. Warp shuffle reduce (5 rounds: offset 16,8,4,2,1)
-5. Lane 0 writes y[row]
+1. Resolve host GGUF tensor pointer to CUDA mapped device pointer
+2. One warp computes one output row
+3. Dequantize K-quant blocks in registers
+4. Dot product with x
+5. Warp shuffle reduce
+6. Lane 0 writes y[row]
 ```
 
 ## fused_norm — RMSNorm + Residual Add
 
 **File:** `src/kernels/fused_norm.cu`
-**Time share:** ~11% of decode time.
+**Validated:** layer RMSNorm, Qwen3 Q/K per-head RMSNorm, final RMSNorm.
 
 ### What it does
 
@@ -68,12 +87,15 @@ Pass 2: Normalize and scale
 
 ### Shared memory usage
 
-`hidden_dim × sizeof(float)` for intermediate values. For hidden_dim=2048: 8 KB. For hidden_dim=3072: 12 KB. Both fit in 48 KB.
+The current kernel does not cache the full hidden vector in shared memory. It
+reads the input once for the sum-of-squares reduction and once for the final
+scale/write. This avoided an earlier shared-memory layout bug that produced
+alternating zeros in Qwen3 RMSNorm output.
 
 ## attention — Flash Attention Decode
 
 **File:** `src/kernels/attention.cu`
-**Time share:** ~28% of decode time.
+**Validated:** Qwen3 single-token decode attention with GQA.
 
 ### What it does
 
@@ -104,6 +126,7 @@ Block:  128 threads
 Shared: ATTN_TILE_KV (64) + head_dim floats for scores + output accumulator
 Tile:   64 KV tokens per iteration
 
+KV layout: [seq_len, n_kv_heads, head_dim]
 GQA: kv_head = head / (n_heads / n_kv_heads)
 INT8 KV: dequantize on-the-fly in the dot product loop
 ```
@@ -180,8 +203,8 @@ Converts FP16 logits to FP32 on GPU before D2H copy for sampling.
 
 | Kernel | Bottleneck | Registers | Shared mem |
 |--------|-----------|-----------|------------|
-| gemv_q4 | Memory bandwidth | 34 | 0 |
-| fused_norm | Memory bandwidth | 26 | hidden_dim × 4 |
+| gemv_q4/q5/q6 K | Memory bandwidth | 40-48 | 0 |
+| fused_norm | Memory bandwidth | 26 | 128 bytes |
 | attention | Memory bandwidth | 40 | (64 + head_dim) × 4 |
 | rope | Compute (trig) | 13 | 0 |
 | softmax | Memory bandwidth | 23 | ~36 bytes |

@@ -1,7 +1,7 @@
 # genie-ai-runtime
 
 Jetson Orin-tuned LLM inference runtime — memory-first, power-aware,
-zero-allocation. Built to serve [`GenieClaw`](https://github.com/GeniePod/genie-claw)
+with pre-allocated KV/scratch pools. Built to serve [`GenieClaw`](https://github.com/GeniePod/genie-claw)
 on a 7.6 GB iGPU without crowding out whisper.cpp + Piper + Home Assistant.
 
 **Target hardware:** Jetson Orin Nano Super 8 GB (SM 8.7, 102 GB/s, 67 TOPS GPU)
@@ -9,9 +9,23 @@ on a 7.6 GB iGPU without crowding out whisper.cpp + Piper + Home Assistant.
 
 ## Status
 
-`v0.1.0-alpha.1` — code-complete from the seed framework at
-[ai-hpc/ai-hardware-engineer-roadmap / Projects / jetson-llm-runtime](https://github.com/ai-hpc/ai-hardware-engineer-roadmap/tree/main/Projects/jetson-llm-runtime).
-Compiles cleanly; pending hardware validation per `ROADMAP.md` Week 1–2.
+`v0.1.0-alpha.2` — validated on Jetson Orin Nano Super 8 GB with
+`Qwen3-4B-Q4_K_M.gguf`.
+
+Current validated path:
+- Coherent Qwen3 instruct output with automatic chat template and no-think mode.
+- GGUF tokenizer loads Qwen BPE merges and special tokens.
+- Qwen3 architecture fixes: 128-dim attention heads, Q/K RMSNorm, NeoX RoPE,
+  tied output embeddings.
+- Default GPU decode kernels for K-quant GEMV, RMSNorm, and single-token
+  attention on Orin SM 8.7.
+- Jetson power reporting handles L4T R36 sysfs paths and `nvpmodel` wattage
+  strings such as `NV Power Mode: 25W`.
+
+Latest on-device smoke test: Qwen3-4B Q4_K_M, 25 W mode, GPU locked at
+918 MHz, 18 prompt tokens at 1.5 tok/s and 19 decode tokens at 1.4 tok/s,
+peak memory 3425 MB, peak temperature 50.0°C. See
+[`docs/validation-week1.md`](docs/validation-week1.md).
 
 ## Why
 
@@ -24,7 +38,7 @@ voice STT, TTS, denoise, and a Home Assistant container:
 - **TensorRT-LLM** — fast but datacenter-shaped (A100/H100), too heavy
   for Orin Nano's iGPU budget.
 - **genie-ai-runtime** — memory-first, power-aware, Orin-tuned CUDA
-  kernels (SM 8.7), zero-allocation steady-state inference. Single
+  kernels (SM 8.7), pre-allocated KV/scratch pools. Single
   binary, single GGUF model file, single shared-memory budget that
   fits alongside `whisper-server` and `genie-core`.
 
@@ -87,6 +101,21 @@ Short flags only. CLI: `-m` model, `-p` prompt, `-n` max tokens,
 `-c` context, `-t` temperature, `-i` interactive, `-v` verbose,
 `-h` help. Server: `-m` model, `-p` **port** (not prompt — heads up),
 `-c` context, `--fp16-kv` to disable INT8 KV cache.
+
+## Runtime Flags
+
+Fast CUDA paths are enabled by default. Per-kernel fallbacks remain available
+for debugging:
+
+```
+JLLM_FAST_GEMV=0  # use CPU reference K-quant GEMV
+JLLM_FAST_NORM=0  # use CPU reference RMSNorm
+JLLM_FAST_ATTN=0  # use CPU reference decode attention
+JLLM_DEBUG_KERNELS=1  # print first-token kernel diagnostics
+```
+
+For Qwen instruct/chat models, CLI prompts are chat-wrapped by default. Use
+`--raw` to disable the template or `--think` to allow Qwen3 thinking output.
 
 ## Test
 

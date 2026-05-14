@@ -135,7 +135,7 @@ public:
 
 private:
     Config cfg_ = {};
-    void*  gpu_pool_ = nullptr;   // cudaMallocHost — fast, pinned
+    void*  gpu_pool_ = nullptr;   // cudaMallocManaged — CPU/GPU visible
     void*  cpu_pool_ = nullptr;   // malloc — overflow, slower GPU access
     int    used_tokens_ = 0;
     int    gpu_tokens_ = 0;
@@ -148,8 +148,7 @@ private:
     }
 };
 
-// ── Scratch allocator — one-time alloc, reuse forever ────────────────────
-// No malloc/free during inference. Ever.
+// ── Scratch allocator — one-time alloc, reused by decode buffers ─────────
 
 class ScratchPool {
 public:

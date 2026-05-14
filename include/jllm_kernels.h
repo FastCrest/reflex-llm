@@ -3,7 +3,7 @@
 // Design rules:
 //   1. Every kernel minimizes DRAM traffic (102 GB/s is the bottleneck)
 //   2. Tile sizes tuned for 48 KB shared memory per SM
-//   3. Thread blocks sized for 16 SMs × 48 warps max
+//   3. Thread blocks sized for the 8-SM Orin Nano Super baseline
 //   4. Fuse everything possible (fewer kernels = fewer DRAM round-trips)
 //   5. INT4 dequant fused into compute (never write dequantized weights to DRAM)
 //

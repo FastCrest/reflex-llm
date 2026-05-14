@@ -8,20 +8,22 @@ All hardware queries read directly from sysfs/procfs — no NVIDIA SDK dependenc
 
 ### Power Modes
 
-| Mode | Watts | GPU Max MHz | Recommended use |
-|------|-------|-------------|-----------------|
-| MAXN (0) | 25W | 1300 | Maximum performance, active cooling required |
-| 15W (1) | 15W | 900 | Balanced, small heatsink |
-| 10W (2) | 10W | 600 | Low power, fanless possible |
-| 7W (3) | 7W | 400 | Minimum, battery operation |
+`nvpmodel` mode ids are board- and BSP-specific. On the validated L4T R36 Orin
+Nano Super, `sudo nvpmodel -m 1` reports `NV Power Mode: 25W`. Do not assume
+that id `1` means 15 W on every Jetson SKU.
+
+The runtime parses the wattage string from `nvpmodel -q` and reports the actual
+mode as `Power: 25W mode, GPU @ 918/918 MHz, 6 CPUs online` when clocks are
+locked.
 
 ### Reading Power State
 
 ```cpp
 PowerState ps = read_power_state();
-// ps.mode:            POWER_MAXN / POWER_15W / POWER_10W / POWER_7W
-// ps.watts:           25 / 15 / 10 / 7
+// ps.mode:            POWER_MAXN / POWER_15W / POWER_10W / POWER_7W / POWER_UNKNOWN
+// ps.watts:           parsed from nvpmodel -q, e.g. 25
 // ps.gpu_freq_mhz:    current GPU frequency
+// ps.gpu_freq_max_mhz:max GPU frequency from devfreq
 // ps.emc_freq_mhz:    memory controller frequency
 // ps.cpu_freq_mhz:    max CPU frequency
 // ps.cpu_online:      number of online CPU cores
@@ -31,11 +33,11 @@ PowerState ps = read_power_state();
 
 | What | Path |
 |------|------|
-| GPU current frequency | `/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq` |
-| GPU max frequency | `/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/max_freq` |
+| GPU current frequency | probes R35/R36 variants under `17000000.ga10b`, `17000000.gpu`, and `gpu.0` |
+| GPU max frequency | same devfreq path variants as current frequency |
 | EMC (memory) frequency | `/sys/kernel/debug/bpmp/debug/clk/emc/rate` |
 | CPU frequency | `/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq` |
-| CPU online | `/sys/devices/system/cpu/cpuN/online` |
+| CPU online | `/sys/devices/system/cpu/online`, fallback to `cpuN/online` |
 | Power mode | `nvpmodel -q` (popen) |
 
 ### Setting Power Mode
@@ -94,7 +96,7 @@ Output:
 ║   Jetson LLM Runtime v0.1            ║
 ╠══════════════════════════════════════╣
 ║ L4T:    36.4       CUDA: 12.6       ║
-║ SMs:    16          Cores: 1024      ║
+║ SMs:    8           Cores: 1024      ║
 ║ RAM:    7633  MB    CMA: 768  MB    ║
 ║ NVMe:   42000 MB free               ║
 ╚══════════════════════════════════════╝
@@ -121,7 +123,7 @@ Output (single-line, carriage return for in-place update):
 
 Reads:
 - `/proc/meminfo` → RAM used/total
-- `/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/load` → GPU utilization %
-- `/sys/devices/17000000.ga10b/devfreq/17000000.ga10b/cur_freq` → GPU MHz
+- devfreq path variants under `17000000.ga10b`, `17000000.gpu`, and `gpu.0`
+  → GPU utilization and MHz
 - Thermal zones → GPU temperature
 - `tokens_per_sec` set by engine

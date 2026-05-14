@@ -12,3 +12,4 @@
 | [build.md](build.md) | Build system, dependencies, cross-compilation notes |
 | [testing.md](testing.md) | Test plan, test descriptions, expected results, debugging |
 | [performance.md](performance.md) | Benchmarking, profiling, optimization targets |
+| [validation-week1.md](validation-week1.md) | First coherent on-device Qwen3 validation and measured numbers |

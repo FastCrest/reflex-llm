@@ -28,8 +28,10 @@ assumes Llama defaults.
 | `n_layers`        | 36         | |
 | `n_heads`         | 32         | query heads |
 | `n_kv_heads`      | 8          | **GQA, 4-way grouping** |
-| `head_dim`        | 80         | **not 128** — unusual, breaks any kernel that hardcodes 128 |
-| `hidden_dim`      | 2560       | = n_heads × head_dim |
+| `head_dim`        | 128        | from `attention.key_length`; do not derive from `hidden_dim / n_heads` |
+| `hidden_dim`      | 2560       | model residual width |
+| `q_proj_dim`      | 4096       | `n_heads × head_dim` |
+| `kv_proj_dim`     | 1024       | `n_kv_heads × head_dim` |
 | `intermediate_dim`| 9216       | FFN width |
 | `vocab_size`      | 151,936    | huge (Llama is 32k, Llama-3 is 128k) |
 | `max_seq_len`     | 40,960     | model max context |
@@ -151,9 +153,10 @@ in GGUF's column-major layout) and use the non-`hidden_dim` axis.
 
 - `mmap()` the entire file `PROT_READ | MAP_PRIVATE`. The file isn't
   copied into RAM yet — Linux's page cache will pull pages on demand.
-- `cudaHostRegister(mapped, size, cudaHostRegisterReadOnly)` to pin
-  the pages and make them GPU-accessible. On Jetson this is essentially
-  a "tell the iGPU's IOMMU that these pages exist" call.
+- `cudaHostRegister(..., cudaHostRegisterMapped | cudaHostRegisterReadOnly)`
+  to pin the pages and get a CUDA-visible device alias for the mmap'd
+  weights. CUDA kernels use that device alias; raw CPU mmap pointers are
+  not dereferenced on-device.
 
 After this, `Engine` holds a single `void* weights_` pointing at the
 mapped+pinned blob.
@@ -176,10 +179,8 @@ and bind it to the right field of `ModelWeights` / `LayerWeights[N]`:
 ... etc
 ```
 
-We track `mapped` count vs total tensors. For Qwen3-4B you see
-`Mapped 326/398` because not every tensor is consumed yet — biases and
-some scale tensors (e.g. `attn_q.scale_inv` from AWQ derivatives) go
-unbound. That's fine for correctness.
+We track `mapped` count vs total tensors. For Qwen3-4B you should see
+`Mapped 398 / 398 tensors to weight structs`.
 
 If `output.weight` was missing, we alias to `token_embd.weight` — see
 `if (!mw->output && mw->tok_embd) mw->output = mw->tok_embd;`.
@@ -192,8 +193,9 @@ If `output.weight` was missing, we alias to `token_embd.weight` — see
   arenas can draw from.
 - **`KVCachePool::init`** allocates `n_layers × n_kv_heads × head_dim ×
   context × 2 (K+V) × kv_bytes` of unified memory (`cudaMallocManaged`).
-  For Qwen3-4B with INT8 KV and 8192 context: `36 × 8 × 80 × 8192 × 2`
-  = 360 MB. Plus a 90 MB "overflow" pool for when fast pool is full.
+  For Qwen3-4B with FP16 KV and 4096 context:
+  `2 × 36 × 8 × 128 × 4096 × 2` = 576 MiB. Plus a 144 MiB
+  overflow pool for the extra 1024-token overflow context.
 - **`ScratchPool::init`** grabs 64 MB of unified memory as a bump
   allocator for per-layer activation buffers (Q, K, V, attn output,
   gate/up/down FFN intermediates, etc.). Reset on each token.
@@ -224,40 +226,39 @@ For each prompt token, *prefill*:
 Then for each output token, *decode*:
 1. Same as above for one token.
 2. Final `output_norm` RMSNorm.
-3. `gemv_q4(logits_fp16, output, …, normed, vocab_size, hidden_dim)`
+3. `gemv_quant_f32(logits_fp32, output, output_type, normed, vocab_size, hidden_dim)`
    — multiplies the final normed hidden state by the tied embedding
-   matrix to get 151,936 logits.
-4. `fp16_to_fp32` then sample (top-k / top-p / temperature).
+   matrix to get 151,936 FP32 logits.
+4. Sample (top-k / top-p / temperature).
 5. Append to `recent_tokens_`, set `last_token_`, loop.
 
 ### 8. transformer_layer (the most complex single step)
 
 ```cpp
 half* normed = scratch_.get(H);
-fused_rmsnorm_residual(normed, x, zero, lw.rms_attn, ...);
+fused_rmsnorm_residual(normed, x, nullptr, lw.rms_attn, ...);
 
-gemv_q4(q_buf, lw.wq, lw.sq, normed, n_heads*head_dim, H, ...);
-gemv_q4(k_buf, lw.wk, lw.sk, normed, n_kv_heads*head_dim, H, ...);
-gemv_q4(v_buf, lw.wv, lw.sv, normed, n_kv_heads*head_dim, H, ...);
+gemv_quant(q_buf, lw.wq, lw.type_wq, normed, n_heads*head_dim, H, ...);
+gemv_quant(k_buf, lw.wk, lw.type_wk, normed, n_kv_heads*head_dim, H, ...);
+gemv_quant(v_buf, lw.wv, lw.type_wv, normed, n_kv_heads*head_dim, H, ...);
 
 // Qwen3 only: RMSNorm Q and K per-head against attn_q_norm / attn_k_norm
-qwen3_qk_norm(q_buf, lw.q_norm, n_heads,    head_dim);
-qwen3_qk_norm(k_buf, lw.k_norm, n_kv_heads, head_dim);
+fused_rmsnorm_residual(q_buf, q_buf, nullptr, lw.q_norm, n_heads,    head_dim, ...);
+fused_rmsnorm_residual(k_buf, k_buf, nullptr, lw.k_norm, n_kv_heads, head_dim, ...);
 
-apply_rope(q_buf, n_heads,    head_dim, pos, rope_theta);
-apply_rope(k_buf, n_kv_heads, head_dim, pos, rope_theta);
+rope_inplace(q_buf, k_buf, n_heads, n_kv_heads, head_dim, pos, rope_theta, rope_neox);
 
 kv_cache_.store(layer, pos, k_buf, v_buf);
 flash_attention(attn_out, q_buf, kv_cache_, layer, pos, n_heads, n_kv_heads, head_dim);
-gemv_q4(attn_proj, lw.wo, lw.so, attn_out, H, n_heads*head_dim, ...);
+gemv_quant(attn_proj, lw.wo, lw.type_wo, attn_out, H, n_heads*head_dim, ...);
 
 vec_add(x2, x, attn_proj);                           // residual
 
-fused_rmsnorm_residual(normed2, x2, zero, lw.rms_ffn, ...);
-gemv_q4(gate_buf, lw.w_gate, lw.s_gate, normed2, I, H, ...);
-gemv_q4(up_buf,   lw.w_up,   lw.s_up,   normed2, I, H, ...);
+fused_rmsnorm_residual(normed2, x2, nullptr, lw.rms_ffn, ...);
+gemv_quant(gate_buf, lw.w_gate, lw.type_w_gate, normed2, I, H, ...);
+gemv_quant(up_buf,   lw.w_up,   lw.type_w_up,   normed2, I, H, ...);
 swiglu(swiglu_out, gate_buf, up_buf, I);             // silu(gate) * up
-gemv_q4(ffn_out, lw.w_down, lw.s_down, swiglu_out, H, I, ...);
+gemv_quant(ffn_out, lw.w_down, lw.type_w_down, swiglu_out, H, I, ...);
 
 vec_add(x, x2, ffn_out);                             // residual into x in place
 ```
@@ -269,14 +270,15 @@ choice that broke our default.
 
 | Bug we hit | Qwen3 choice that broke us | Fix |
 | --- | --- | --- |
-| Auto-context picked 40,960 → 1.8 GB pinned alloc → NvMap OOM | `max_seq_len = 40,960` (large) | Cap auto-context at 8192 unless user asks for more (`5abc01b`) |
+| Auto-context picked 40,960 → oversized KV allocation | `max_seq_len = 40,960` (large) | Cap auto-context to a Jetson-safe default, currently 4096 for 128-dim K/V heads |
 | `output.weight` missing → null pointer in final GEMV | `tie_word_embeddings: true` | Alias `output` to `token_embd` when not found (`5abc01b`) |
 | `vocab_size = 2560` reported (= hidden_dim) | GGUF stores `token_embd.weight` as `[hidden_dim, vocab_size]` (column-major) | Read the non-hidden_dim axis (`202b6ca`) |
+| Q/K/V projection widths wrong | Qwen3 stores `attention.key_length = 128`, so Q is 4096-wide and K/V are 1024-wide even though hidden_dim is 2560 | Use `head_dim` metadata for attention projection widths (`d96d082`) |
 | Token salad despite "valid" embeddings, magnitudes 13/59 | `token_embd.weight` is **Q6_K** in Q4_K_M builds, not Q4_K | Add `dequant_q6k_row` (`afffb28`) |
 | RMSNorm output = constant garbage regardless of input | `cudaMallocHost` on Tegra isn't auto-GPU-visible | Switch scratch + KV pools to `cudaMallocManaged` (`1f4bcac`) |
 | Garbled attention even after RMSNorm fixed | Qwen3 has **QK-norm**: RMSNorm on Q and K per-head before RoPE | Add the QK-norm step (`258aa2d`) |
 | Subtle attention errors that grew across layers | KV cache fast-pool stride was wrong | Fix layer stride (`fb8fbae`) |
-| Custom kernels miscomputed | Multiple — kernel-level work for Week 3-5 | Temporarily replace with reference CPU paths (`b3b185d`, `016de1c`, `358d31e`) to unblock Week 1 |
+| Custom kernels miscomputed | Multiple — kernel-level work for Week 3-5 | Re-enable validated GPU GEMV/RMSNorm/attention paths by default (`88cab24`) |
 
 ## Mental model going forward
 
@@ -297,11 +299,12 @@ silently missing tensors. That used to be a `WARNING` we glossed over;
 it's the most useful diagnostic for "this model has structure we
 don't know about."
 
-## What the kernel work in Weeks 3-5 of `#1` is for
+## Current validation state
 
-The reference-CPU paths shipped in `b3b185d`, `016de1c`, `358d31e`
-unblock Week 1 (first coherent tokens) at the cost of throughput.
-Once Qwen3 produces correct output end-to-end against this CPU path,
-the kernel work re-introduces optimized SM 8.7 versions one at a time,
-each gated on a byte-equal comparison with the reference. That's
-what the ROADMAP labels "Weeks 3-5: kernel tuning — ≥20% faster decode".
+Week 1 is complete for Qwen3-4B Q4_K_M: the runtime generates coherent
+output on Jetson, and the validated GPU GEMV, RMSNorm, and decode attention
+paths are enabled by default. CPU/reference fallbacks remain available through
+`JLLM_FAST_GEMV=0`, `JLLM_FAST_NORM=0`, and `JLLM_FAST_ATTN=0`.
+
+The next roadmap items are llama.cpp baseline benchmarking, long-run stability,
+and additional throughput tuning beyond the correctness baseline.
