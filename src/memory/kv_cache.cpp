@@ -1,13 +1,13 @@
 // kv_cache.cpp — Pre-allocated KV cache with GPU/CPU tiering
 //
 // On Jetson unified memory:
-//   cudaMallocHost → pinned DRAM, GPU reads at full bandwidth, CPU can also read
-//   malloc         → pageable DRAM, GPU reads via page faults (slower, but doesn't OOM)
+//   cudaMalloc     → GPU-visible DRAM without managed-memory bookkeeping
+//   malloc         → pageable DRAM, CPU-side overflow storage
 //
 // Strategy:
-//   - "Fast pool" (cudaMallocHost): recent tokens, GPU reads at ~102 GB/s
-//   - "Overflow pool" (malloc): old tokens, GPU reads via page faults (~50 GB/s)
-//   - When fast pool full: evict oldest to overflow (just a memcpy within same DRAM)
+//   - "Fast pool" (cudaMalloc): recent tokens, GPU kernels read/write directly
+//   - "Overflow pool" (malloc): old tokens, copied back only if overflow is used
+//   - When fast pool full: evict oldest to overflow
 
 #include "jllm_memory.h"
 #include <cuda_runtime.h>
@@ -26,20 +26,23 @@ bool KVCachePool::init(const Config& cfg) {
     fprintf(stderr, "[kv_cache] Allocating fast pool: %ld MB (%d tokens)\n",
             fast_bytes / (1024*1024), cfg.max_context);
 
-    // Fast pool: unified memory (GPU + CPU access via same pointer,
-    // page-migration on demand). Same rationale as ScratchPool — on
-    // Tegra, cudaMallocHost's host pointer is NOT automatically GPU-
-    // visible without explicit mapping flags + a separate device-pointer
-    // lookup, and the symptom of getting that wrong is "kernel writes go
-    // nowhere visible to the CPU." cudaMallocManaged gives a single
-    // pointer that works from both sides.
-    cudaError_t err = cudaMallocManaged(&gpu_pool_, fast_bytes);
+    // Fast pool: device allocation. The KV cache is consumed by CUDA kernels
+    // and device-to-device copies; keeping it out of managed memory avoids
+    // UM bookkeeping and is easier to fit after device-resident weights.
+    cudaError_t err = cudaMalloc(&gpu_pool_, fast_bytes);
     if (err != cudaSuccess) {
-        fprintf(stderr, "[kv_cache] FATAL: cudaMallocManaged failed: %s\n",
+        fprintf(stderr, "[kv_cache] FATAL: cudaMalloc failed: %s\n",
                 cudaGetErrorString(err));
         return false;
     }
-    memset(gpu_pool_, 0, fast_bytes);
+    err = cudaMemset(gpu_pool_, 0, fast_bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[kv_cache] FATAL: cudaMemset failed: %s\n",
+                cudaGetErrorString(err));
+        cudaFree(gpu_pool_);
+        gpu_pool_ = nullptr;
+        return false;
+    }
 
     // Overflow pool: regular malloc (optional)
     if (cfg.overflow_context > 0 && overflow_bytes > 0) {
@@ -60,7 +63,7 @@ bool KVCachePool::init(const Config& cfg) {
 }
 
 void KVCachePool::destroy() {
-    // cudaFree pairs with cudaMallocManaged (NOT cudaFreeHost).
+    // cudaFree pairs with cudaMalloc.
     if (gpu_pool_) { cudaFree(gpu_pool_); gpu_pool_ = nullptr; }
     if (cpu_pool_) { free(cpu_pool_); cpu_pool_ = nullptr; }
     used_tokens_ = 0;
@@ -109,13 +112,14 @@ void KVCachePool::evict(int n_tokens) {
         char* src = (char*)gpu_pool_ + l * (int64_t)cfg_.max_context * eb;
         char* dst = (char*)cpu_pool_ + l * (int64_t)cfg_.overflow_context * eb;
 
-        // Copy oldest n_tokens to overflow
-        memcpy(dst, src, n_tokens * eb);
+        // Copy oldest n_tokens to overflow.
+        cudaMemcpy(dst, src, n_tokens * eb, cudaMemcpyDeviceToHost);
 
         // Shift remaining in fast pool
         int remaining = gpu_tokens_ - n_tokens;
         if (remaining > 0) {
-            memmove(src, src + n_tokens * eb, remaining * eb);
+            cudaMemcpy(src, src + n_tokens * eb, remaining * eb,
+                       cudaMemcpyDeviceToDevice);
         }
     }
 

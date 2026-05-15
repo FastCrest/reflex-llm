@@ -94,11 +94,9 @@ private:
 
 // ── KV Cache Pool — pre-allocated, no runtime malloc ─────────────────────
 //
-// Key insight: on Jetson unified memory, we allocate KV cache with
-// cudaMallocHost (pinned). This gives:
-//   - GPU can read it directly (zero-copy, no cudaMemcpy)
-//   - CPU can read it directly (for debugging, export)
-//   - No page fault overhead (pinned = not swappable)
+// Key insight: the fast KV cache is only used by CUDA kernels, so it can live
+// in a plain cudaMalloc allocation. This avoids managed-memory bookkeeping
+// pressure after device-resident weights are loaded.
 //
 // For longer context: overflow to unpinned CPU memory (slower GPU access
 // via page faults, but doesn't OOM).
@@ -136,7 +134,7 @@ public:
 
 private:
     Config cfg_ = {};
-    void*  gpu_pool_ = nullptr;   // cudaMallocManaged — CPU/GPU visible
+    void*  gpu_pool_ = nullptr;   // cudaMalloc — GPU-visible fast pool
     void*  cpu_pool_ = nullptr;   // malloc — overflow, slower GPU access
     int    used_tokens_ = 0;
     int    gpu_tokens_ = 0;
