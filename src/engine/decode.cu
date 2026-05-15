@@ -557,7 +557,8 @@ static size_t layer_quant_weight_bytes(const LayerWeights& lw,
     return bytes;
 }
 
-static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
+static bool copy_layer_quant_weights_to_device(int layer,
+                                               LayerWeights& lw,
                                                const ModelConfig& cfg,
                                                std::vector<void*>& owned) {
     const int H = cfg.hidden_dim;
@@ -603,11 +604,13 @@ static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
     }
 
     void* arena = nullptr;
+    fprintf(stderr, "[model] Copying layer %d weights to device arena (%zu MB)\n",
+            layer, arena_bytes / (1024 * 1024));
     cudaError_t err = cudaMalloc(&arena, arena_bytes);
     if (err != cudaSuccess) {
         fprintf(stderr,
-                "[model] cudaMalloc layer weight arena (%zu MB) failed: %s\n",
-                arena_bytes / (1024 * 1024), cudaGetErrorString(err));
+                "[model] cudaMalloc layer %d weight arena (%zu MB) failed: %s\n",
+                layer, arena_bytes / (1024 * 1024), cudaGetErrorString(err));
         return false;
     }
 
@@ -666,7 +669,7 @@ static size_t materialize_layer_weights(ModelWeights& mw,
             (int64_t)((bytes + 1024 * 1024 - 1) / (1024 * 1024));
         if (free_mb < mb + reserve_mb) break;
 
-        if (!copy_layer_quant_weights_to_device(lw, cfg, owned)) break;
+        if (!copy_layer_quant_weights_to_device(l, lw, cfg, owned)) break;
 
         free_mb -= mb;
         total_bytes += bytes;
@@ -748,6 +751,38 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     }
     int ctx = auto_ctx; // keep `ctx` for the rest of the function
 
+    size_t output_device_bytes = 0;
+    size_t layer_device_bytes = 0;
+
+    // Full device-resident mode has the tightest memory envelope on 8 GB
+    // Jetsons. Copy transformer layers before KV/scratch/output so copied
+    // file-backed GGUF pages can be dropped as we go, instead of overlapping
+    // the whole mmap with the device copies.
+    if (!mapped_weight_device_enabled()) {
+        layer_device_bytes =
+            materialize_layer_weights(model_weights_, config_, budget_,
+                                      device_weight_copies_);
+        if (layer_device_bytes == (size_t)-1) {
+            return false;
+        }
+        budget_.model_mb += layer_device_bytes / (1024 * 1024);
+
+        if (weights_) {
+            madvise(weights_, weights_size_, MADV_DONTNEED);
+        }
+
+        output_device_bytes =
+            materialize_output_weight(model_weights_, config_, budget_,
+                                      device_weight_copies_);
+        if (output_device_bytes == 0) {
+            fprintf(stderr,
+                    "[model] FATAL: JLLM_MAPPED_WEIGHTS=0 requires the "
+                    "embedding/output projection to be device-resident\n");
+            return false;
+        }
+        budget_.model_mb += output_device_bytes / (1024 * 1024);
+    }
+
     KVCachePool::Config kv_cfg = {};
     kv_cfg.n_layers = config_.n_layers;
     kv_cfg.n_kv_heads = config_.n_kv_heads;
@@ -772,18 +807,20 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     if (!scratch_.init(scratch_bytes)) return false;
     budget_.scratch_mb = scratch_bytes / (1024 * 1024);
 
-    const size_t output_device_bytes =
-        materialize_output_weight(model_weights_, config_, budget_,
-                                  device_weight_copies_);
-    budget_.model_mb += output_device_bytes / (1024 * 1024);
+    if (mapped_weight_device_enabled()) {
+        output_device_bytes =
+            materialize_output_weight(model_weights_, config_, budget_,
+                                      device_weight_copies_);
+        budget_.model_mb += output_device_bytes / (1024 * 1024);
 
-    const size_t layer_device_bytes =
-        materialize_layer_weights(model_weights_, config_, budget_,
-                                  device_weight_copies_);
-    if (layer_device_bytes == (size_t)-1) {
-        return false;
+        layer_device_bytes =
+            materialize_layer_weights(model_weights_, config_, budget_,
+                                      device_weight_copies_);
+        if (layer_device_bytes == (size_t)-1) {
+            return false;
+        }
+        budget_.model_mb += layer_device_bytes / (1024 * 1024);
     }
-    budget_.model_mb += layer_device_bytes / (1024 * 1024);
 
     if (!mapped_weight_device_enabled() && weights_) {
         madvise(weights_, weights_size_, MADV_DONTNEED);
