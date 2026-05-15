@@ -849,24 +849,6 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     size_t output_device_bytes = 0;
     size_t layer_device_bytes = 0;
 
-    // Full device-resident mode has the tightest memory envelope on 8 GB
-    // Jetsons. Copy transformer layers before KV/scratch/output so copied
-    // file-backed GGUF pages can be dropped as we go, instead of overlapping
-    // the whole mmap with the device copies.
-    if (!mapped_weight_device_enabled()) {
-        layer_device_bytes =
-            materialize_layer_weights(model_weights_, config_, budget_,
-                                      device_weight_copies_);
-        if (layer_device_bytes == (size_t)-1) {
-            return false;
-        }
-        budget_.model_mb += layer_device_bytes / (1024 * 1024);
-
-        if (weights_) {
-            madvise(weights_, weights_size_, MADV_DONTNEED);
-        }
-    }
-
     KVCachePool::Config kv_cfg = {};
     kv_cfg.n_layers = config_.n_layers;
     kv_cfg.n_kv_heads = config_.n_kv_heads;
@@ -892,6 +874,21 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     budget_.scratch_mb = scratch_bytes / (1024 * 1024);
 
     if (!mapped_weight_device_enabled()) {
+        // Full device-resident mode has the tightest memory envelope on 8 GB
+        // Jetsons. Give mandatory runtime buffers first claim on CUDA memory,
+        // then copy transformer layers and release copied GGUF pages as we go.
+        layer_device_bytes =
+            materialize_layer_weights(model_weights_, config_, budget_,
+                                      device_weight_copies_);
+        if (layer_device_bytes == (size_t)-1) {
+            return false;
+        }
+        budget_.model_mb += layer_device_bytes / (1024 * 1024);
+
+        if (weights_) {
+            madvise(weights_, weights_size_, MADV_DONTNEED);
+        }
+
         output_device_bytes =
             materialize_output_weight(model_weights_, config_, budget_,
                                       device_weight_copies_,
