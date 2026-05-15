@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <unistd.h>
 #include <sys/mman.h>   // BUG #4 fix
@@ -413,6 +414,28 @@ static bool mapped_weight_device_enabled() {
     return enabled;
 }
 
+static bool release_host_weight_pages_enabled() {
+    static const bool enabled = [] {
+        const char* v = getenv("JLLM_RELEASE_HOST_WEIGHTS");
+        return !mapped_weight_device_enabled() && (!v || strcmp(v, "0") != 0);
+    }();
+    return enabled;
+}
+
+static void release_host_weight_pages(const void* ptr, size_t bytes) {
+    if (!release_host_weight_pages_enabled() || !ptr || bytes == 0) return;
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return;
+
+    const uintptr_t begin = (uintptr_t)ptr & ~((uintptr_t)page_size - 1);
+    const uintptr_t end = ((uintptr_t)ptr + bytes + (uintptr_t)page_size - 1) &
+                          ~((uintptr_t)page_size - 1);
+    if (end > begin) {
+        madvise((void*)begin, end - begin, MADV_DONTNEED);
+    }
+}
+
 static bool fast_gemv_enabled_for_device_weights() {
     static const bool enabled = [] {
         const char* v = getenv("JLLM_FAST_GEMV");
@@ -487,7 +510,8 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
         return 0;
     }
 
-    err = cudaMemcpy(output_device, mw.output, bytes, cudaMemcpyHostToDevice);
+    const void* output_src = mw.output;
+    err = cudaMemcpy(output_device, output_src, bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         fprintf(stderr,
                 "[model] device output copy failed (%zu MB): %s\n",
@@ -497,10 +521,13 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
     }
 
     owned.push_back(output_device);
-    const bool tied_output = (mw.output == mw.tok_embd);
+    const bool tied_output = (output_src == mw.tok_embd);
     mw.output = output_device;
     if (tied_output && fast_embedding_enabled()) {
         mw.tok_embd = output_device;
+    }
+    if (!tied_output || fast_embedding_enabled()) {
+        release_host_weight_pages(output_src, bytes);
     }
     fprintf(stderr,
             "[model] Materialized output projection on device (%zu MB)\n",
@@ -553,10 +580,12 @@ static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
     };
 
     void* copied[sizeof(specs) / sizeof(specs[0])] = {};
+    size_t sizes[sizeof(specs) / sizeof(specs[0])] = {};
     for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
         const size_t bytes = kquant_tensor_bytes(specs[i].type,
                                                  specs[i].rows,
                                                  specs[i].cols);
+        sizes[i] = bytes;
         if (bytes == 0 || !copy_weight_to_device(specs[i].src, bytes, &copied[i])) {
             for (void* p : copied) {
                 if (p) cudaFree(p);
@@ -568,6 +597,7 @@ static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
     for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
         *specs[i].dst = copied[i];
         owned.push_back(copied[i]);
+        release_host_weight_pages(specs[i].src, sizes[i]);
     }
     return true;
 }
@@ -584,6 +614,13 @@ static size_t materialize_layer_weights(ModelWeights& mw,
     const int layer_cap = requested_layers < 0
         ? mw.n_layers
         : std::min(requested_layers, mw.n_layers);
+    if (!mapped_weight_device_enabled() && layer_cap < mw.n_layers) {
+        fprintf(stderr,
+                "[model] FATAL: JLLM_MAPPED_WEIGHTS=0 requires all %d layers "
+                "to be device-resident; requested only %d\n",
+                mw.n_layers, layer_cap);
+        return (size_t)-1;
+    }
     const int64_t reserve_mb = 128;
     int64_t free_mb = budget.free_mb();
     size_t total_bytes = 0;
@@ -609,6 +646,18 @@ static size_t materialize_layer_weights(ModelWeights& mw,
         fprintf(stderr,
                 "[model] Materialized %d transformer layers on device (%zu MB)\n",
                 copied_layers, total_bytes / (1024 * 1024));
+        if (release_host_weight_pages_enabled()) {
+            fprintf(stderr,
+                    "[model] Released copied GGUF weight pages from host cache "
+                    "(JLLM_RELEASE_HOST_WEIGHTS=1)\n");
+        }
+    }
+    if (!mapped_weight_device_enabled() && copied_layers < mw.n_layers) {
+        fprintf(stderr,
+                "[model] FATAL: only materialized %d / %d transformer layers "
+                "with JLLM_MAPPED_WEIGHTS=0\n",
+                copied_layers, mw.n_layers);
+        return (size_t)-1;
     }
     return total_bytes;
 }
@@ -700,6 +749,9 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     const size_t layer_device_bytes =
         materialize_layer_weights(model_weights_, config_, budget_,
                                   device_weight_copies_);
+    if (layer_device_bytes == (size_t)-1) {
+        return false;
+    }
     budget_.model_mb += layer_device_bytes / (1024 * 1024);
 
     if (!mapped_weight_device_enabled() && weights_) {
