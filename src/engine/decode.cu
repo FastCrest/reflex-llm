@@ -863,12 +863,11 @@ void Engine::transformer_layer_attn_block(int layer, int pos, half* x_in,
     int Q_DIM = config_.n_heads * config_.head_dim;
 
     half* attn_out  = (half*)scratch_.get(Q_DIM * sizeof(half));
-    half* attn_proj = (half*)scratch_.get(H * sizeof(half));
 
     transformer_layer_attn_compute(layer, pos, q_buf, k_buf, v_buf,
                                    attn_out, qk_norm_already);
-    gemv_quant(attn_proj, lw.wo, lw.type_wo, attn_out, H, Q_DIM, stream_);
-    vec_add(x_attn_out, x_in, attn_proj, H, stream_);
+    gemv_quant_add(x_attn_out, lw.wo, lw.type_wo, attn_out, x_in,
+                   H, Q_DIM, stream_);
 }
 
 void Engine::transformer_layer_ffn_block(int layer, half* x_attn, half* swiglu_in,
@@ -877,9 +876,8 @@ void Engine::transformer_layer_ffn_block(int layer, half* x_attn, half* swiglu_i
     int H = config_.hidden_dim;
     int I = config_.intermediate_dim;
 
-    half* ffn_out = (half*)scratch_.get(H * sizeof(half));
-    gemv_quant(ffn_out, lw.w_down, lw.type_w_down, swiglu_in, H, I, stream_);
-    vec_add(x_out, x_attn, ffn_out, H, stream_);
+    gemv_quant_add(x_out, lw.w_down, lw.type_w_down, swiglu_in, x_attn,
+                   H, I, stream_);
 }
 
 // ── Batched prefill scaffolding (Path B, issue #12) ──────────────────────

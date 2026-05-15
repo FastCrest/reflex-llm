@@ -71,6 +71,21 @@ void gemv_quant(
     cudaStream_t   stream
 );
 
+// K-quant GEMV with fused residual add:
+//   y = W*x + residual
+// Used by decode Wo and W_down exits to remove one vec_add launch and one
+// hidden-vector read/write pass per residual.
+void gemv_quant_add(
+    half*          y,
+    const void*    W,
+    int            ggml_type,
+    const half*    x,
+    const half*    residual,
+    int            M,
+    int            K,
+    cudaStream_t   stream
+);
+
 // Combined K-quant GEMV dispatchers for projections that share the same
 // activation vector. These reduce decode launch overhead for Q/K/V and
 // gate/up without changing math.

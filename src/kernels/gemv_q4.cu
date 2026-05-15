@@ -568,6 +568,30 @@ __device__ __forceinline__ float dot_quant_row_t(
     }
 }
 
+template<int Type>
+__global__ void gemv_quant_add_typed_kernel(
+    half*        __restrict__ y,
+    const void*  __restrict__ W,
+    const half*  __restrict__ x,
+    const half*  __restrict__ residual,
+    int M,
+    int K,
+    int rows_per_block)
+{
+    const int row = blockIdx.x * rows_per_block + threadIdx.x / 32;
+    const int lane = threadIdx.x & 31;
+    if (row >= M) return;
+
+    const int n_blocks = K / QK_K;
+    float acc = dot_quant_row_t<Type>(W, row, n_blocks, x, lane);
+    acc = warp_reduce_sum(acc);
+    if (lane == 0) {
+        const half projected = __float2half(acc);
+        y[row] = __float2half(__half2float(projected) +
+                              __half2float(residual[row]));
+    }
+}
+
 template<int Type0, int Type1>
 __global__ void gemv_quant_pair_typed_kernel(
     half*        __restrict__ y0,
@@ -814,6 +838,44 @@ static bool gemv_quant_triple_gpu(
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) {
         fprintf(stderr, "[GEMV] triple GPU launch failed: %s\n", cudaGetErrorString(err));
+        return false;
+    }
+    return true;
+}
+
+static bool gemv_quant_add_gpu(half* y, const void* W, int ggml_type,
+                               const half* x, const half* residual,
+                               int M, int K, cudaStream_t stream) {
+    const void* W_device = resolve_weight_device_ptr(W);
+    if (!W_device || !supported_gpu_type(ggml_type)) {
+        return false;
+    }
+
+    const int rows_per_block = gemv_rows_per_block();
+    const int block = rows_per_block * 32;
+    const int grid = (M + rows_per_block - 1) / rows_per_block;
+
+    switch (ggml_type) {
+        case 12:
+            gemv_quant_add_typed_kernel<12><<<grid, block, 0, stream>>>(
+                y, W_device, x, residual, M, K, rows_per_block);
+            break;
+        case 13:
+            gemv_quant_add_typed_kernel<13><<<grid, block, 0, stream>>>(
+                y, W_device, x, residual, M, K, rows_per_block);
+            break;
+        case 14:
+            gemv_quant_add_typed_kernel<14><<<grid, block, 0, stream>>>(
+                y, W_device, x, residual, M, K, rows_per_block);
+            break;
+        default:
+            return false;
+    }
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) {
+        fprintf(stderr, "[GEMV] add GPU launch failed: %s\n",
+                cudaGetErrorString(err));
         return false;
     }
     return true;
@@ -1262,6 +1324,36 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
         fprintf(stderr, "\n");
         dbg_count++;
     }
+}
+
+void gemv_quant_add(half* y, const void* W, int ggml_type, const half* x,
+                    const half* residual, int M, int K, cudaStream_t stream) {
+    if (fast_gemv_enabled()) {
+        if (gemv_quant_add_gpu(y, W, ggml_type, x, residual, M, K, stream)) {
+            return;
+        }
+    }
+
+    cudaStreamSynchronize(stream);
+
+    std::vector<half> h_x(K);
+    std::vector<half> h_residual(M);
+    std::vector<float> h_y_f32;
+    std::vector<half> h_y(M);
+    cudaMemcpy(h_x.data(), x, K * sizeof(half), cudaMemcpyDeviceToHost);
+    cudaMemcpy(h_residual.data(), residual, M * sizeof(half), cudaMemcpyDeviceToHost);
+
+    if (!gemv_quant_cpu(h_y_f32, W, ggml_type, h_x, M, K)) {
+        cudaMemsetAsync(y, 0, M * sizeof(half), stream);
+        return;
+    }
+
+    for (int i = 0; i < M; i++) {
+        const half projected = __float2half(h_y_f32[i]);
+        h_y[i] = __float2half(__half2float(projected) +
+                              __half2float(h_residual[i]));
+    }
+    cudaMemcpy(y, h_y.data(), M * sizeof(half), cudaMemcpyHostToDevice);
 }
 
 void gemv_quant_pair(
