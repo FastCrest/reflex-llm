@@ -181,6 +181,8 @@ private:
 
     void*         weights_ = nullptr;
     int64_t       weights_size_ = 0;
+    void*         mapped_output_host_base_ = nullptr;
+    size_t        mapped_output_host_bytes_ = 0;
     ModelWeights  model_weights_ = {};
     std::vector<void*> device_weight_copies_;
     Tokenizer     tokenizer_;

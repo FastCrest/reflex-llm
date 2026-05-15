@@ -310,6 +310,12 @@ void Engine::unload() {
     device_weight_copies_.clear();
     kv_cache_.destroy();
     scratch_.destroy();
+    if (mapped_output_host_base_) {
+        clear_mapped_weight_region(mapped_output_host_base_);
+        cudaHostUnregister(mapped_output_host_base_);
+        mapped_output_host_base_ = nullptr;
+        mapped_output_host_bytes_ = 0;
+    }
     if (weights_) {
         if (resolve_mapped_weight_device_ptr(weights_)) {
             clear_mapped_weight_region(weights_);
@@ -422,6 +428,55 @@ static bool release_host_weight_pages_enabled() {
     return enabled;
 }
 
+static bool map_host_weight_range_for_gpu(const void* ptr, size_t bytes,
+                                          void** host_base_out,
+                                          size_t* host_bytes_out) {
+    if (!ptr || bytes == 0 || !host_base_out || !host_bytes_out) return false;
+
+    const long page_size = sysconf(_SC_PAGESIZE);
+    if (page_size <= 0) return false;
+
+    const uintptr_t begin = (uintptr_t)ptr & ~((uintptr_t)page_size - 1);
+    const uintptr_t end = ((uintptr_t)ptr + bytes + (uintptr_t)page_size - 1) &
+                          ~((uintptr_t)page_size - 1);
+    if (end <= begin) return false;
+
+    void* host_base = (void*)begin;
+    const size_t host_bytes = (size_t)(end - begin);
+
+    (void)cudaSetDeviceFlags(cudaDeviceMapHost);
+    (void)cudaGetLastError();
+
+    cudaError_t err = cudaHostRegister(
+        host_base, host_bytes,
+        cudaHostRegisterPortable | cudaHostRegisterReadOnly | cudaHostRegisterMapped);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "[model] CUDA mapped output/embedding registration failed "
+                "(%zu MB): %s\n",
+                host_bytes / (1024 * 1024), cudaGetErrorString(err));
+        return false;
+    }
+
+    void* device_base = nullptr;
+    err = cudaHostGetDevicePointer(&device_base, host_base, 0);
+    if (err != cudaSuccess || !device_base) {
+        fprintf(stderr,
+                "[model] CUDA mapped output/embedding device pointer failed: %s\n",
+                cudaGetErrorString(err));
+        cudaHostUnregister(host_base);
+        return false;
+    }
+
+    register_mapped_weight_region(host_base, device_base, (int64_t)host_bytes);
+    *host_base_out = host_base;
+    *host_bytes_out = host_bytes;
+    fprintf(stderr,
+            "[model] CUDA mapped output/embedding weights at %p -> %p (%zu MB)\n",
+            host_base, device_base, host_bytes / (1024 * 1024));
+    return true;
+}
+
 static void release_host_weight_pages(const void* ptr, size_t bytes) {
     if (!release_host_weight_pages_enabled() || !ptr || bytes == 0) return;
 
@@ -486,7 +541,9 @@ static size_t align_up_size(size_t value, size_t alignment) {
 
 static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg,
                                         const MemoryBudget& budget,
-                                        std::vector<void*>& owned) {
+                                        std::vector<void*>& owned,
+                                        void** mapped_host_base = nullptr,
+                                        size_t* mapped_host_bytes = nullptr) {
     if (!device_output_enabled() || !fast_gemv_enabled_for_device_weights() ||
         !mw.output) {
         return 0;
@@ -499,22 +556,43 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
 
     const int64_t mb = (int64_t)((bytes + 1024 * 1024 - 1) / (1024 * 1024));
     if (budget.free_mb() < mb + 128) {
+        if (!mapped_weight_device_enabled() &&
+            map_host_weight_range_for_gpu(mw.output, bytes,
+                                          mapped_host_base,
+                                          mapped_host_bytes)) {
+            fprintf(stderr,
+                    "[model] Using CUDA-mapped tied output/embedding "
+                    "(%ld MB requested, %ld MB free budget)\n",
+                    mb, budget.free_mb());
+            return bytes;
+        }
         fprintf(stderr,
                 "[model] device output copy skipped (%ld MB requested, %ld MB free budget)\n",
                 mb, budget.free_mb());
         return 0;
     }
 
+    const void* output_src = mw.output;
     void* output_device = nullptr;
     cudaError_t err = cudaMalloc(&output_device, bytes);
     if (err != cudaSuccess) {
+        (void)cudaGetLastError();
+        if (!mapped_weight_device_enabled() &&
+            map_host_weight_range_for_gpu(output_src, bytes,
+                                          mapped_host_base,
+                                          mapped_host_bytes)) {
+            fprintf(stderr,
+                    "[model] Device output copy unavailable; using CUDA-mapped "
+                    "tied output/embedding (%zu MB)\n",
+                    bytes / (1024 * 1024));
+            return bytes;
+        }
         fprintf(stderr,
                 "[model] device output copy skipped (%zu MB): %s\n",
                 bytes / (1024 * 1024), cudaGetErrorString(err));
         return 0;
     }
 
-    const void* output_src = mw.output;
     err = cudaMemcpy(output_device, output_src, bytes, cudaMemcpyHostToDevice);
     if (err != cudaSuccess) {
         fprintf(stderr,
@@ -773,11 +851,14 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
 
         output_device_bytes =
             materialize_output_weight(model_weights_, config_, budget_,
-                                      device_weight_copies_);
+                                      device_weight_copies_,
+                                      &mapped_output_host_base_,
+                                      &mapped_output_host_bytes_);
         if (output_device_bytes == 0) {
             fprintf(stderr,
                     "[model] FATAL: JLLM_MAPPED_WEIGHTS=0 requires the "
-                    "embedding/output projection to be device-resident\n");
+                    "embedding/output projection to be device-resident or "
+                    "CUDA-mapped\n");
             return false;
         }
         budget_.model_mb += output_device_bytes / (1024 * 1024);
@@ -820,10 +901,6 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
             return false;
         }
         budget_.model_mb += layer_device_bytes / (1024 * 1024);
-    }
-
-    if (!mapped_weight_device_enabled() && weights_) {
-        madvise(weights_, weights_size_, MADV_DONTNEED);
     }
 
     cudaStreamCreate(&stream_);
