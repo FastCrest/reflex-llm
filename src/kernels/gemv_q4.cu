@@ -56,8 +56,8 @@ static const void* resolve_weight_device_ptr(const void* W) {
 static int gemv_rows_per_block() {
     static const int rows = [] {
         const char* v = getenv("JLLM_GEMV_ROWS");
-        int r = v ? atoi(v) : 8;
-        if (r != 4 && r != 8) r = 8;
+        int r = v ? atoi(v) : 4;
+        if (r != 4 && r != 8) r = 4;
         return r;
     }();
     return rows;
