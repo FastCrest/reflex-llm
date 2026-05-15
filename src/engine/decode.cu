@@ -554,6 +554,25 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
                                              cfg.hidden_dim);
     if (bytes == 0) return 0;
 
+    const void* output_src = mw.output;
+    const bool tied_output = (output_src == mw.tok_embd);
+
+    if (!mapped_weight_device_enabled() && tied_output &&
+        mapped_host_base && mapped_host_bytes) {
+        const char* force_copy = getenv("JLLM_DEVICE_OUTPUT_COPY");
+        if (!force_copy || strcmp(force_copy, "1") != 0) {
+            if (map_host_weight_range_for_gpu(output_src, bytes,
+                                              mapped_host_base,
+                                              mapped_host_bytes)) {
+                fprintf(stderr,
+                        "[model] Using CUDA-mapped tied output/embedding "
+                        "(%zu MB)\n",
+                        bytes / (1024 * 1024));
+                return bytes;
+            }
+        }
+    }
+
     const int64_t mb = (int64_t)((bytes + 1024 * 1024 - 1) / (1024 * 1024));
     if (budget.free_mb() < mb + 128) {
         if (!mapped_weight_device_enabled() &&
@@ -572,7 +591,6 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
         return 0;
     }
 
-    const void* output_src = mw.output;
     void* output_device = nullptr;
     cudaError_t err = cudaMalloc(&output_device, bytes);
     if (err != cudaSuccess) {
@@ -603,7 +621,6 @@ static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg
     }
 
     owned.push_back(output_device);
-    const bool tied_output = (output_src == mw.tok_embd);
     mw.output = output_device;
     if (tied_output && fast_embedding_enabled()) {
         mw.tok_embd = output_device;
@@ -848,20 +865,6 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
         if (weights_) {
             madvise(weights_, weights_size_, MADV_DONTNEED);
         }
-
-        output_device_bytes =
-            materialize_output_weight(model_weights_, config_, budget_,
-                                      device_weight_copies_,
-                                      &mapped_output_host_base_,
-                                      &mapped_output_host_bytes_);
-        if (output_device_bytes == 0) {
-            fprintf(stderr,
-                    "[model] FATAL: JLLM_MAPPED_WEIGHTS=0 requires the "
-                    "embedding/output projection to be device-resident or "
-                    "CUDA-mapped\n");
-            return false;
-        }
-        budget_.model_mb += output_device_bytes / (1024 * 1024);
     }
 
     KVCachePool::Config kv_cfg = {};
@@ -888,7 +891,21 @@ bool Engine::load(const std::string& gguf_path, const GenParams& params) {
     if (!scratch_.init(scratch_bytes)) return false;
     budget_.scratch_mb = scratch_bytes / (1024 * 1024);
 
-    if (mapped_weight_device_enabled()) {
+    if (!mapped_weight_device_enabled()) {
+        output_device_bytes =
+            materialize_output_weight(model_weights_, config_, budget_,
+                                      device_weight_copies_,
+                                      &mapped_output_host_base_,
+                                      &mapped_output_host_bytes_);
+        if (output_device_bytes == 0) {
+            fprintf(stderr,
+                    "[model] FATAL: JLLM_MAPPED_WEIGHTS=0 requires the "
+                    "embedding/output projection to be device-resident or "
+                    "CUDA-mapped\n");
+            return false;
+        }
+        budget_.model_mb += output_device_bytes / (1024 * 1024);
+    } else {
         output_device_bytes =
             materialize_output_weight(model_weights_, config_, budget_,
                                       device_weight_copies_);
