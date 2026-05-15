@@ -480,6 +480,10 @@ static size_t kquant_tensor_bytes(int ggml_type, int rows, int cols) {
     return (size_t)rows * (size_t)(cols / 256) * block_bytes;
 }
 
+static size_t align_up_size(size_t value, size_t alignment) {
+    return ((value + alignment - 1) / alignment) * alignment;
+}
+
 static size_t materialize_output_weight(ModelWeights& mw, const ModelConfig& cfg,
                                         const MemoryBudget& budget,
                                         std::vector<void*>& owned) {
@@ -579,26 +583,53 @@ static bool copy_layer_quant_weights_to_device(LayerWeights& lw,
         {lw.w_down, &lw.w_down, lw.type_w_down, H, I},
     };
 
-    void* copied[sizeof(specs) / sizeof(specs[0])] = {};
-    size_t sizes[sizeof(specs) / sizeof(specs[0])] = {};
-    for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+    constexpr size_t ARENA_ALIGN = 256;
+    constexpr size_t N = sizeof(specs) / sizeof(specs[0]);
+    size_t offsets[N] = {};
+    size_t sizes[N] = {};
+    void* copied[N] = {};
+    size_t arena_bytes = 0;
+
+    for (size_t i = 0; i < N; i++) {
         const size_t bytes = kquant_tensor_bytes(specs[i].type,
                                                  specs[i].rows,
                                                  specs[i].cols);
         sizes[i] = bytes;
-        if (bytes == 0 || !copy_weight_to_device(specs[i].src, bytes, &copied[i])) {
-            for (void* p : copied) {
-                if (p) cudaFree(p);
-            }
+        if (bytes == 0 || !specs[i].src) {
+            return false;
+        }
+        offsets[i] = arena_bytes;
+        arena_bytes += align_up_size(bytes, ARENA_ALIGN);
+    }
+
+    void* arena = nullptr;
+    cudaError_t err = cudaMalloc(&arena, arena_bytes);
+    if (err != cudaSuccess) {
+        fprintf(stderr,
+                "[model] cudaMalloc layer weight arena (%zu MB) failed: %s\n",
+                arena_bytes / (1024 * 1024), cudaGetErrorString(err));
+        return false;
+    }
+
+    uint8_t* arena_u8 = (uint8_t*)arena;
+    for (size_t i = 0; i < N; i++) {
+        copied[i] = arena_u8 + offsets[i];
+        err = cudaMemcpy(copied[i], specs[i].src, sizes[i],
+                         cudaMemcpyHostToDevice);
+        if (err != cudaSuccess) {
+            fprintf(stderr,
+                    "[model] cudaMemcpy layer weight copy (%zu bytes) failed: %s\n",
+                    sizes[i], cudaGetErrorString(err));
+            cudaFree(arena);
             return false;
         }
     }
 
-    for (size_t i = 0; i < sizeof(specs) / sizeof(specs[0]); i++) {
+    for (size_t i = 0; i < N; i++) {
         *specs[i].dst = copied[i];
-        owned.push_back(copied[i]);
         release_host_weight_pages(specs[i].src, sizes[i]);
     }
+    owned.push_back(arena);
     return true;
 }
 
