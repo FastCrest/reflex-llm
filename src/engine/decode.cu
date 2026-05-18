@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <stdexcept>
 #include <unistd.h>
 #include <sys/mman.h>   // BUG #4 fix
 
@@ -1620,10 +1621,31 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     // (tokenization + prefill + first decode step).
     auto t_request = Clock::now();
 
+    const int kv_token_limit = kv_cache_.max_tokens();
+    const size_t max_prompt_bytes = std::max<size_t>(
+        4096, (size_t)kv_token_limit * 8);
+    if (prompt.size() > max_prompt_bytes) {
+        throw std::length_error(
+            "prompt size " + std::to_string(prompt.size()) +
+            " bytes exceeds runtime pre-tokenization budget " +
+            std::to_string(max_prompt_bytes) +
+            " bytes for context capacity " +
+            std::to_string(kv_token_limit) +
+            " tokens; reduce the prompt/history or start the server with a larger -c value");
+    }
+
     auto prompt_tokens = tokenizer_.encode(prompt);
     stats.prompt_tokens = prompt_tokens.size();
     if (prompt_tokens.empty()) {
         prompt_tokens.push_back(tokenizer_.bos_id);
+    }
+
+    if ((int)prompt_tokens.size() >= kv_token_limit) {
+        throw std::length_error(
+            "prompt length " + std::to_string(prompt_tokens.size()) +
+            " tokens exceeds runtime context capacity " +
+            std::to_string(kv_token_limit) +
+            " tokens; reduce the prompt/history or start the server with a larger -c value");
     }
 
     // Path F4a (#45): track the tokens whose K/V state is committed to
@@ -1812,7 +1834,6 @@ GenStats Engine::generate(const std::string& prompt, const GenParams& params,
     // Decode loop (t2 already taken above so it covers Path A too).
     int64_t peak_mem = 0;
     float peak_temp = 0;
-    const int kv_token_limit = kv_cache_.max_tokens();
     // Path A: the first generated token (if any) was already sampled
     // above. Position advances to N (one past the prompt) — we did NOT
     // double-store position N-1 in the KV cache, unlike the previous
