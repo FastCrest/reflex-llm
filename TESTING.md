@@ -1,4 +1,4 @@
-# Testing Guide — jetson-llm
+# Testing Guide — reflex-llm
 
 Step-by-step testing from first build to production validation.
 
@@ -47,8 +47,8 @@ ssh user@192.168.55.1
 
 # Clone or copy the project
 cd /opt
-git clone <your-repo-url> jetson-llm-runtime
-cd jetson-llm-runtime
+git clone <your-repo-url> reflex-llm
+cd reflex-llm
 
 # First-time setup (sets power mode, checks system)
 ./scripts/setup_jetson.sh
@@ -69,7 +69,7 @@ cmake --build build -j$(nproc)
 -- The CUDA compiler identification is NVIDIA 12.6
 -- CUDA architectures: 87
 ...
-[100%] Built target jetson-llm
+[100%] Built target reflex-llm
 ```
 
 **If build fails:**
@@ -126,7 +126,7 @@ All memory tests passed.
 **Expected output:**
 
 ```
-=== jetson-llm kernel tests ===
+=== reflex-llm kernel tests ===
 
 GPU: Orin (SM 8.7, 16 SMs)
 
@@ -155,7 +155,7 @@ All kernel tests passed.
 **Expected output:**
 
 ```
-=== jetson-llm model loading test ===
+=== reflex-llm model loading test ===
 
 Test 1: System probe
 ╔══════════════════════════════════════╗
@@ -255,7 +255,7 @@ Compare the output names with what `load_and_map_weights()` expects and fix the 
 
 ```bash
 # Short generation — verify output is coherent (not garbage)
-./build/jetson-llm \
+./build/reflex-llm \
     -m /opt/models/TinyLlama-1.1B-Q4_K_M.gguf \
     -p "What is 2+2?" \
     -n 32 \
@@ -289,11 +289,11 @@ Segfault                               ← null weight pointer: mapping failed
 
 # 2. Profile to see which kernels are running
 nsys profile --trace=cuda -o debug \
-    ./build/jetson-llm -m model.gguf -p "Hi" -n 5
+    ./build/reflex-llm -m model.gguf -p "Hi" -n 5
 nsys stats debug.nsys-rep
 
 # 3. Check memory during inference
-./build/jetson-llm -m model.gguf -p "Hi" -n 10 &
+./build/reflex-llm -m model.gguf -p "Hi" -n 10 &
 PID=$!; sleep 1; cat /proc/$PID/status | grep VmRSS; wait $PID
 
 # 4. Compare tokenizer output with reference
@@ -311,7 +311,7 @@ print('Decoded:', tok.decode(ids))
 ## Step 6: Interactive Chat Test
 
 ```bash
-./build/jetson-llm -m /opt/models/TinyLlama-1.1B-Q4_K_M.gguf -i
+./build/reflex-llm -m /opt/models/TinyLlama-1.1B-Q4_K_M.gguf -i
 ```
 
 ```
@@ -338,7 +338,7 @@ Paris is the capital of France...
 
 ```bash
 # Terminal 1: start server
-./build/jetson-llm-server -m /opt/models/TinyLlama-1.1B-Q4_K_M.gguf -p 8080
+./build/reflex-llm-server -m /opt/models/TinyLlama-1.1B-Q4_K_M.gguf -p 8080
 
 # Terminal 2: test endpoints
 # Health check
@@ -410,7 +410,7 @@ scp Llama-3.2-3B-Q4_K_M.gguf user@192.168.55.1:/opt/models/
 
 # Run tests
 ./build/test_model_load /opt/models/Llama-3.2-3B-Q4_K_M.gguf
-./build/jetson-llm -m /opt/models/Llama-3.2-3B-Q4_K_M.gguf -p "Hello" -n 32
+./build/reflex-llm -m /opt/models/Llama-3.2-3B-Q4_K_M.gguf -p "Hello" -n 32
 ./scripts/bench.sh /opt/models/Llama-3.2-3B-Q4_K_M.gguf
 ```
 
@@ -426,7 +426,7 @@ scp Llama-3.2-3B-Q4_K_M.gguf user@192.168.55.1:/opt/models/
 
 ```bash
 # Long generation — tests KV cache growth and thermal stability
-./build/jetson-llm -m /opt/models/Llama-3.2-3B-Q4_K_M.gguf \
+./build/reflex-llm -m /opt/models/Llama-3.2-3B-Q4_K_M.gguf \
     -p "Write a very long and detailed essay about the history of computing." \
     -n 1024 -v
 
@@ -459,11 +459,11 @@ done
 ./build/test_model_load model.gguf
 
 # 3. Generation
-./build/jetson-llm -m model.gguf -p "Hello" -n 32
-./build/jetson-llm -m model.gguf -i
+./build/reflex-llm -m model.gguf -p "Hello" -n 32
+./build/reflex-llm -m model.gguf -i
 
 # 4. Server
-./build/jetson-llm-server -m model.gguf -p 8080
+./build/reflex-llm-server -m model.gguf -p 8080
 curl http://localhost:8080/health
 
 # 5. Benchmark + profile

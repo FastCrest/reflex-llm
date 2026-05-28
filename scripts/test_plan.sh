@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════
-# jetson-llm Test Plan — Run on Jetson Orin Nano Super
+# reflex-llm Test Plan — Run on Jetson Orin Nano Super
 #
 # Usage:
 #   ./scripts/test_plan.sh [model.gguf]
@@ -31,7 +31,7 @@ skip() { echo -e "${YELLOW}SKIP${NC}: $1"; SKIP_COUNT=$((SKIP_COUNT+1)); echo "S
 info() { echo -e "${YELLOW}INFO${NC}: $1"; echo "INFO: $1" >> "$LOG_FILE"; }
 
 echo "═══════════════════════════════════════════════════════════════"
-echo "  jetson-llm Test Plan"
+echo "  reflex-llm Test Plan"
 echo "  Date: $(date)"
 echo "  Log:  $LOG_FILE"
 echo "═══════════════════════════════════════════════════════════════"
@@ -113,6 +113,7 @@ echo -n "T1.1 CMake configure: "
 cmake -B build \
     -DGGML_CUDA=ON \
     -DCMAKE_CUDA_ARCHITECTURES="87" \
+    -DREFLEX_LLM_BUILD_SERVER=ON \
     -DCMAKE_BUILD_TYPE=Release \
     >> "$LOG_FILE" 2>&1
 if [ $? -eq 0 ]; then
@@ -135,7 +136,7 @@ fi
 # T1.3: Binaries exist
 echo -n "T1.3 Binaries: "
 ALL_BINS=true
-for bin in jetson-llm jetson-llm-server test_memory test_kernels test_model_load; do
+for bin in reflex-llm reflex-llm-server test_memory test_kernels test_model_load; do
     if [ ! -f "build/$bin" ]; then
         fail "build/$bin not found"
         ALL_BINS=false
@@ -306,7 +307,7 @@ echo "══ PHASE 5: Inference ════════════════
 
 # T5.1: Short generation — does it produce output?
 echo -n "T5.1 Short generation (32 tokens): "
-OUTPUT=$(timeout 60 ./build/jetson-llm -m "$MODEL" -p "What is 2+2?" -n 32 2>&1)
+OUTPUT=$(timeout 60 ./build/reflex-llm -m "$MODEL" -p "What is 2+2?" -n 32 2>&1)
 EXIT_CODE=$?
 echo "$OUTPUT" >> "$LOG_FILE"
 
@@ -349,7 +350,7 @@ fi
 
 # T5.5: Longer generation (128 tokens)
 echo -n "T5.5 Long generation (128 tokens): "
-OUTPUT128=$(timeout 120 ./build/jetson-llm -m "$MODEL" \
+OUTPUT128=$(timeout 120 ./build/reflex-llm -m "$MODEL" \
     -p "Explain how GPU memory works in simple terms." -n 128 2>&1)
 if [ $? -eq 0 ]; then
     DECODE_TOK=$(echo "$OUTPUT128" | grep "Decode:" | grep -oP '\d+ tokens')
@@ -361,7 +362,7 @@ fi
 # T5.6: Memory stability — no growth during generation
 echo -n "T5.6 Memory stability: "
 FREE_BEFORE=$(free -m | awk '/Mem:/ {print $7}')
-./build/jetson-llm -m "$MODEL" -p "Test" -n 64 >/dev/null 2>&1
+./build/reflex-llm -m "$MODEL" -p "Test" -n 64 >/dev/null 2>&1
 FREE_AFTER=$(free -m | awk '/Mem:/ {print $7}')
 DIFF=$((FREE_BEFORE - FREE_AFTER))
 if [ "$DIFF" -lt 100 ] && [ "$DIFF" -gt -100 ]; then
@@ -378,7 +379,7 @@ echo ""
 echo "══ PHASE 6: Server ════════════════════════════════════════════"
 
 # Start server in background
-./build/jetson-llm-server -m "$MODEL" -p 9999 &>/dev/null &
+./build/reflex-llm-server -m "$MODEL" -p 9999 &>/dev/null &
 SERVER_PID=$!
 sleep 3
 
@@ -474,7 +475,7 @@ TOTAL=$((PASS_COUNT + FAIL_COUNT))
 if [ $FAIL_COUNT -eq 0 ]; then
     echo -e "  ${GREEN}═══ ALL $TOTAL TESTS PASSED ═══${NC}"
     echo ""
-    echo "  jetson-llm is ready for production testing."
+    echo "  reflex-llm is ready for production testing."
     echo "  Next: ./scripts/bench.sh $MODEL"
 else
     echo -e "  ${RED}═══ $FAIL_COUNT FAILURE(S) — FIX BEFORE DEPLOYING ═══${NC}"

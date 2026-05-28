@@ -1,7 +1,8 @@
-# jetson-llm Documentation
+# reflex-llm Documentation
 
 | Document | Description |
 |----------|-------------|
+| [reflex-infer-integration.md](reflex-infer-integration.md) | Two-repo split and kernel-library integration contract |
 | [architecture.md](architecture.md) | System architecture, data flow, design decisions |
 | [memory.md](memory.md) | Memory-first design: budget, KV cache, scratch pool, OOM guard |
 | [kernels.md](kernels.md) | All 6 CUDA kernels: what they do, Orin tuning, performance notes |

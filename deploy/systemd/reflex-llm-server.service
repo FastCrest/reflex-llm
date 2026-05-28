@@ -1,6 +1,6 @@
 [Unit]
-Description=jetson-llm-server — Jetson Orin LLM HTTP server (genie-ai-runtime)
-Documentation=https://github.com/GeniePod/genie-ai-runtime
+Description=reflex-llm-server — Jetson Orin LLM HTTP server
+Documentation=https://github.com/reflex-infer/reflex-llm
 After=network-online.target
 Wants=network-online.target
 
@@ -8,18 +8,18 @@ Wants=network-online.target
 Type=simple
 # scripts/setup.sh rewrites `User=` to whoever ran the installer
 # (typically the JetPack login user, which is already in video/render).
-# A dedicated `jetson-llm` user works too as long as it's added to
+# A dedicated `reflex-llm` user works too as long as it's added to
 # the video + render groups before first start.
 User=aihpc
 
 # Settings live in an env file so MODEL_PATH / PORT changes don't
-# need to touch the unit. See /etc/jetson-llm/server.env.
-EnvironmentFile=/etc/jetson-llm/server.env
+# need to touch the unit. See /etc/reflex-llm/server.env.
+EnvironmentFile=/etc/reflex-llm/server.env
 
 # Fail fast if the model path is wrong — beats a 30-second cold-load
 # crash on every restart attempt.
 ExecStartPre=/bin/sh -c 'test -r "$MODEL_PATH" || { echo "MODEL_PATH=$MODEL_PATH is not readable"; exit 1; }'
-ExecStart=/opt/jetson-llm/bin/jetson-llm-server -m ${MODEL_PATH} -p ${PORT}
+ExecStart=/opt/reflex-llm/bin/reflex-llm-server -m ${MODEL_PATH} -p ${PORT}
 
 # Restart on crash, but don't flap when the model file is gone.
 Restart=on-failure

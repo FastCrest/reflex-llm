@@ -1,5 +1,5 @@
 // main_server.cpp — HTTP server entry point
-// Usage: jetson-llm-server -m model.gguf [-p port] [-c context]
+// Usage: reflex-llm-server -m model.gguf [-p port] [-c context]
 
 #include "jllm.h"
 #include <cstdio>
@@ -34,13 +34,13 @@ int main(int argc, char** argv) {
 #ifndef JLLM_VERSION
 #define JLLM_VERSION "dev"
 #endif
-            fprintf(stdout, "genie-ai-runtime / jetson-llm-server %s\n", JLLM_VERSION);
+            fprintf(stdout, "reflex-llm-server %s\n", JLLM_VERSION);
             return 0;
         }
         else if (strcmp(argv[i], "-h") == 0) {
             fprintf(stderr,
-                "jetson-llm-server — OpenAI-compatible LLM API for Jetson\n\n"
-                "Usage: jetson-llm-server -m model.gguf [options]\n\n"
+                "reflex-llm-server — OpenAI-compatible LLM API for Jetson\n\n"
+                "Usage: reflex-llm-server -m model.gguf [options]\n\n"
                 "  -m PATH      GGUF model (required)\n"
                 "  -p PORT      HTTP port (default: 8080)\n"
                 "  -c INT       Context length (0 = auto from memory)\n"

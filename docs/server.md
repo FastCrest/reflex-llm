@@ -1,22 +1,22 @@
 # HTTP Server
 
-OpenAI-compatible REST API for the genie-ai-runtime inference engine.
+OpenAI-compatible REST API for the reflex-llm inference engine.
 Built on [cpp-httplib](https://github.com/yhirose/cpp-httplib) and
 [nlohmann/json](https://github.com/nlohmann/json) (the same building
 blocks llama.cpp's server uses), pulled at configure time via CMake
 `FetchContent`. Single Engine instance, mutex-guarded `generate()` so
 concurrent requests queue rather than corrupt KV state.
 
-> **Opt-in build.** genie-ai-runtime ships as an embeddable engine.
-> Build the standalone server with `-DJLLM_BUILD_SERVER=ON`:
+> **Opt-in build.** reflex-llm ships as an embeddable engine.
+> Build the standalone server with `-DREFLEX_LLM_BUILD_SERVER=ON`:
 >
 > ```bash
-> cmake -B build -DCMAKE_BUILD_TYPE=Release -DJLLM_BUILD_SERVER=ON
+> cmake -B build -DCMAKE_BUILD_TYPE=Release -DREFLEX_LLM_BUILD_SERVER=ON
 > cmake --build build -j$(nproc)
 > ```
 >
-> genie-claw consumes the engine via direct library link
-> (`jetson_llm_core.a`); the server is for standalone REST deployments
+> Embedded applications can consume the engine via direct library link
+> (`reflex_llm_core.a`); the server is for standalone REST deployments
 > and A/B testing against `llama-server`.
 
 Source: `src/main_server.cpp`, `src/server/http_server.cpp`.
@@ -24,7 +24,7 @@ Source: `src/main_server.cpp`, `src/server/http_server.cpp`.
 ## Run
 
 ```bash
-./build/jetson-llm-server -m /path/to/model.gguf -p 8080
+./build/reflex-llm-server -m /path/to/model.gguf -p 8080
 ```
 
 | Flag           | Default | Notes |
@@ -32,7 +32,7 @@ Source: `src/main_server.cpp`, `src/server/http_server.cpp`.
 | `-m PATH`      | —       | GGUF model file (required) |
 | `-p PORT`      | 8080    | HTTP port |
 | `-c INT`       | auto    | Context length (0 = auto from memory budget) |
-| `--int8-kv`    | off     | Use INT8 KV cache. Server defaults to FP16 so Path F persistent KV save/load works — see [#67](https://github.com/GeniePod/genie-ai-runtime/issues/67) for the v3 format that will unify the two. |
+| `--int8-kv`    | off     | Use INT8 KV cache. Server defaults to FP16 so Path F persistent KV save/load works — see Issue #67 for the v3 format that will unify the two. |
 | `--fp16-kv`    | on      | FP16 KV (default for the server) |
 
 ## Endpoints
@@ -66,7 +66,7 @@ curl -s http://jetson:8080/v1/models
 
 ```json
 {"object": "list",
- "data":   [{"id": "Qwen3 4B Instruct Awq", "object": "model", "owned_by": "genie-ai-runtime"}]}
+ "data":   [{"id": "Qwen3 4B Instruct Awq", "object": "model", "owned_by": "reflex-llm"}]}
 ```
 
 ### `POST /v1/chat/completions`
@@ -86,7 +86,7 @@ Qwen chat template; the rolling context determines the answer.
 | `stream`          | bool   | false   | Emit `text/event-stream` chunks instead of one JSON body |
 | `think`           | bool   | false   | Allow Qwen3 thinking-mode output. When `true`, the model may emit `<think>reasoning</think>final answer` — the server splits the two and returns them in separate fields (see "Reasoning output" below). When `false`, an empty think block is prefixed to suppress reasoning. |
 | `conversation_id` | string | —       | Path F persistent KV id (`[A-Za-z0-9_-]{1,64}`); only effective under FP16 KV today |
-| `kv_int8`         | bool   | (load)  | Override KV format per-request. Defaults to whatever the server was loaded with; mismatch with load-time format produces garbage tokens. Don't surface to clients today — see [#67](https://github.com/GeniePod/genie-ai-runtime/issues/67). |
+| `kv_int8`         | bool   | (load)  | Override KV format per-request. Defaults to whatever the server was loaded with; mismatch with load-time format produces garbage tokens. Don't surface to clients today — see Issue #67. |
 
 **Non-streaming response** (typical):
 
@@ -239,22 +239,22 @@ watch -n5 'curl -s http://jetson:8080/health | python3 -m json.tool'
 
 ## Running as a systemd service
 
-Quick install after a successful `-DJLLM_BUILD_SERVER=ON` build:
+Quick install after a successful `-DREFLEX_LLM_BUILD_SERVER=ON` build:
 
 ```bash
 sudo ./scripts/setup.sh
 # optional flags: --user pat --model /path.gguf --port 8080
-sudo systemctl enable --now jetson-llm-server
-sudo journalctl -u jetson-llm-server -f
+sudo systemctl enable --now reflex-llm-server
+sudo journalctl -u reflex-llm-server -f
 ```
 
 What it installs:
 
 | Path                                             | Notes |
 | ------------------------------------------------ | ----- |
-| `/opt/jetson-llm/bin/jetson-llm-server`          | The binary |
-| `/etc/systemd/system/jetson-llm-server.service`  | Unit (templated `User=`) |
-| `/etc/jetson-llm/server.env`                     | `MODEL_PATH`, `PORT` — edit + `systemctl restart` |
+| `/opt/reflex-llm/bin/reflex-llm-server`          | The binary |
+| `/etc/systemd/system/reflex-llm-server.service`  | Unit (templated `User=`) |
+| `/etc/reflex-llm/server.env`                     | `MODEL_PATH`, `PORT` — edit + `systemctl restart` |
 
 Unit highlights:
 
@@ -291,8 +291,8 @@ Unit highlights:
 
 - **#67** — Path F format v3, so INT8 KV + persistent KV interop.
 - **#5** acceptance items remaining: parallel-A/B vs `llama-server` once
-  systemd unit is verified under load (not on the genie-claw critical
-  path since the embedding API is the consumer that matters).
+  systemd unit is verified under load. The embedding API remains the primary
+  consumer path.
 - Streaming `usage` block (OpenAI added it to their stream protocol
   recently) — easy add when a consumer needs it.
 - `peak_mem_mb` / `peak_temp_c` on the server path — attach the

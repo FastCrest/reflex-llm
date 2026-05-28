@@ -1,11 +1,11 @@
 #!/bin/bash
-# setup_jetson.sh — First-time setup for jetson-llm runtime
+# setup_jetson.sh — First-time setup for reflex-llm runtime
 # Run on Jetson Orin Nano Super
 
 set -e
 
 echo "═══════════════════════════════════════════"
-echo "  jetson-llm first-time setup"
+echo "  reflex-llm first-time setup"
 echo "═══════════════════════════════════════════"
 
 # Check we're on Jetson
@@ -63,7 +63,7 @@ sudo apt-get install -y -qq cmake build-essential cuda-toolkit-* 2>/dev/null || 
 
 # 5. Build
 echo ""
-echo "▸ Building jetson-llm..."
+echo "▸ Building reflex-llm..."
 cd "$(dirname "$0")/.."
 cmake -B build \
     -DCMAKE_CUDA_ARCHITECTURES="87" \
@@ -71,7 +71,7 @@ cmake -B build \
     2>&1 | tail -5
 cmake --build build -j$(nproc) 2>&1 | tail -10
 
-if [ -f build/jetson-llm ]; then
+if [ -f build/reflex-llm ]; then
     echo ""
     echo "✓ Build successful!"
     echo ""
@@ -81,10 +81,10 @@ if [ -f build/jetson-llm ]; then
     echo "  wget https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf"
     echo ""
     echo "  # Run interactive chat"
-    echo "  ./build/jetson-llm -m Llama-3.2-3B-Instruct-Q4_K_M.gguf -i"
+    echo "  ./build/reflex-llm -m Llama-3.2-3B-Instruct-Q4_K_M.gguf -i"
     echo ""
     echo "  # Run API server"
-    echo "  ./build/jetson-llm-server -m Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 8080"
+    echo "  ./build/reflex-llm-server -m Llama-3.2-3B-Instruct-Q4_K_M.gguf -p 8080"
 else
     echo "✗ Build failed. Check errors above."
     exit 1

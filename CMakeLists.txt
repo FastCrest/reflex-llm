@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(jetson-llm VERSION 1.0.0 LANGUAGES C CXX CUDA)
+project(reflex-llm VERSION 1.0.0 LANGUAGES C CXX CUDA)
 
 # Compile-time JLLM_VERSION string for CLI / server --version output.
 add_compile_definitions(JLLM_VERSION="${PROJECT_VERSION}")
@@ -50,6 +50,13 @@ endif()
 find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
 
+option(REFLEX_LLM_USE_REFLEX_INFER
+    "Link the external reflex-infer kernel library when available"
+    OFF)
+if(REFLEX_LLM_USE_REFLEX_INFER)
+    find_package(reflex-infer CONFIG REQUIRED)
+endif()
+
 # Make CUDA headers visible to .cpp files (they include cuda_runtime.h)
 include_directories(${CUDAToolkit_INCLUDE_DIRS})
 
@@ -93,40 +100,52 @@ set(SERVER_SRC
 )
 
 # ── Library ──────────────────────────────────────────────────────────────
-add_library(jetson_llm_core STATIC
+add_library(reflex_llm_core STATIC
     ${MEMORY_SRC} ${JETSON_SRC} ${KERNEL_SRC} ${ENGINE_SRC} ${PERSISTENCE_SRC}
 )
-target_include_directories(jetson_llm_core PUBLIC include)
-target_link_libraries(jetson_llm_core PUBLIC
+add_library(reflex::llm ALIAS reflex_llm_core)
+target_include_directories(reflex_llm_core PUBLIC include)
+target_link_libraries(reflex_llm_core PUBLIC
     CUDA::cudart CUDA::cublas Threads::Threads
 )
+if(REFLEX_LLM_USE_REFLEX_INFER)
+    target_link_libraries(reflex_llm_core PUBLIC reflex::infer)
+    target_compile_definitions(reflex_llm_core PUBLIC REFLEX_LLM_USE_REFLEX_INFER=1)
+endif()
 
 # Apply host LTO only when supported. Skipping for CUDA targets
 # (gemv_q4.cu et al.) intentionally — see the IPO comment above.
 if(JLLM_IPO_SUPPORTED AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_property(TARGET jetson_llm_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET reflex_llm_core PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # ── CLI binary ───────────────────────────────────────────────────────────
-add_executable(jetson-llm src/main.cpp)
-target_link_libraries(jetson-llm PRIVATE jetson_llm_core)
+add_executable(reflex-llm src/main.cpp)
+target_link_libraries(reflex-llm PRIVATE reflex_llm_core)
 if(JLLM_IPO_SUPPORTED AND CMAKE_BUILD_TYPE STREQUAL "Release")
-    set_property(TARGET jetson-llm PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+    set_property(TARGET reflex-llm PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
 endif()
 
 # ── Optional server binary ───────────────────────────────────────────────
-# The standalone HTTP server is OFF by default. genie-ai-runtime ships as
-# an embeddable engine (jetson_llm_core + the CLI); the web/HTTP layer
-# lives in genie-claw, which links jetson_llm_core directly. Enable with
-# -DJLLM_BUILD_SERVER=ON for standalone REST deployments or A/B testing
+# The standalone HTTP server is OFF by default. reflex-llm ships as
+# an embeddable engine (reflex_llm_core + the CLI). Enable with
+# -DREFLEX_LLM_BUILD_SERVER=ON for standalone REST deployments or A/B testing
 # against llama-server. Skipping it also skips the FetchContent network
 # pull, so the default build is offline once dependencies are vendored
 # by JetPack / apt.
-option(JLLM_BUILD_SERVER
-    "Build the standalone jetson-llm-server REST binary (default OFF — genie-claw embeds the engine directly; turn ON for standalone HTTP)"
+option(REFLEX_LLM_BUILD_SERVER
+    "Build the standalone reflex-llm-server REST binary (default OFF; turn ON for standalone HTTP)"
     OFF)
 
+# Legacy compatibility for pre-rebrand scripts.
+option(JLLM_BUILD_SERVER
+    "Deprecated alias for REFLEX_LLM_BUILD_SERVER"
+    OFF)
 if(JLLM_BUILD_SERVER)
+    set(REFLEX_LLM_BUILD_SERVER ON)
+endif()
+
+if(REFLEX_LLM_BUILD_SERVER)
     # cpp-httplib + nlohmann/json — same stack llama.cpp's server uses.
     # Both header-only and MIT-licensed. Pulled at configure time via
     # FetchContent so we don't carry ~50 K lines of vendor code in this
@@ -150,36 +169,36 @@ if(JLLM_BUILD_SERVER)
     set(JSON_Install    OFF CACHE INTERNAL "")
     FetchContent_MakeAvailable(httplib nlohmann_json)
 
-    add_executable(jetson-llm-server src/main_server.cpp ${SERVER_SRC})
-    target_link_libraries(jetson-llm-server PRIVATE
-        jetson_llm_core
+    add_executable(reflex-llm-server src/main_server.cpp ${SERVER_SRC})
+    target_link_libraries(reflex-llm-server PRIVATE
+        reflex_llm_core
         httplib::httplib
         nlohmann_json::nlohmann_json
     )
     if(JLLM_IPO_SUPPORTED AND CMAKE_BUILD_TYPE STREQUAL "Release")
-        set_property(TARGET jetson-llm-server PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
+        set_property(TARGET reflex-llm-server PROPERTY INTERPROCEDURAL_OPTIMIZATION TRUE)
     endif()
-    message(STATUS "jetson-llm-server: ENABLED (cpp-httplib + nlohmann/json via FetchContent)")
+    message(STATUS "reflex-llm-server: ENABLED (cpp-httplib + nlohmann/json via FetchContent)")
 else()
-    message(STATUS "jetson-llm-server: disabled (pass -DJLLM_BUILD_SERVER=ON to enable)")
+    message(STATUS "reflex-llm-server: disabled (pass -DREFLEX_LLM_BUILD_SERVER=ON to enable)")
 endif()
 
 # ── Tests ────────────────────────────────────────────────────────────────
 enable_testing()
 add_executable(test_memory tests/test_memory.cpp)
-target_link_libraries(test_memory PRIVATE jetson_llm_core)
+target_link_libraries(test_memory PRIVATE reflex_llm_core)
 add_test(NAME memory COMMAND test_memory)
 
 add_executable(test_kernels tests/test_kernels.cu)
-target_link_libraries(test_kernels PRIVATE jetson_llm_core)
+target_link_libraries(test_kernels PRIVATE reflex_llm_core)
 add_test(NAME kernels COMMAND test_kernels)
 
 add_executable(test_model_load tests/test_model_load.cpp)
-target_link_libraries(test_model_load PRIVATE jetson_llm_core)
+target_link_libraries(test_model_load PRIVATE reflex_llm_core)
 # Run with: ./build/test_model_load model.gguf
 
 # Path E phase E1 smoke test: validate `mma.sync.m16n8k16` on SM 8.7.
-# Standalone — does not link jetson_llm_core, intentionally so the smoke
+# Standalone — does not link reflex_llm_core, intentionally so the smoke
 # test can compile and run even if the runtime is broken.
 add_executable(test_mma_smoke tests/test_mma_smoke.cu)
 target_link_libraries(test_mma_smoke PRIVATE CUDA::cudart)
@@ -228,7 +247,7 @@ add_test(NAME kv_serialize COMMAND test_kv_serialize)
 # Path I phase I1 (#62): per-head INT8 scale storage in KVCachePool.
 # Allocation + accessor layout test. Engine wiring lands in I2/I3.
 add_executable(test_kv_scale_storage tests/test_kv_scale_storage.cu)
-target_link_libraries(test_kv_scale_storage PRIVATE jetson_llm_core)
+target_link_libraries(test_kv_scale_storage PRIVATE reflex_llm_core)
 add_test(NAME kv_scale_storage COMMAND test_kv_scale_storage)
 
 # Path I phase I2 (#62): FP16 → INT8 conversion + per-head scale
@@ -236,5 +255,5 @@ add_test(NAME kv_scale_storage COMMAND test_kv_scale_storage)
 # (uninit row_max + nullptr scale_out fixes) AND the engine-style
 # call shape (rows=n_kv_heads, cols=head_dim).
 add_executable(test_kv_int8_convert tests/test_kv_int8_convert.cu)
-target_link_libraries(test_kv_int8_convert PRIVATE jetson_llm_core)
+target_link_libraries(test_kv_int8_convert PRIVATE reflex_llm_core)
 add_test(NAME kv_int8_convert COMMAND test_kv_int8_convert)

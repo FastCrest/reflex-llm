@@ -1,5 +1,5 @@
 #!/bin/bash
-# bench.sh — Benchmark jetson-llm against llama.cpp baseline
+# bench.sh — Benchmark reflex-llm against llama.cpp baseline
 # Usage: ./scripts/bench.sh model.gguf
 
 set -e
@@ -11,7 +11,7 @@ if [ ! -f "$MODEL" ]; then
 fi
 
 echo "═══════════════════════════════════════════════════"
-echo "  jetson-llm benchmark"
+echo "  reflex-llm benchmark"
 echo "  Model: $MODEL"
 echo "  Date:  $(date)"
 echo "  Git:   $(git rev-parse --short HEAD 2>/dev/null || echo 'n/a')"
@@ -30,16 +30,16 @@ SIZE=$(ls -lh "$MODEL" | awk '{print $5}')
 echo "  Model: $SIZE"
 
 echo ""
-echo "▸ Running jetson-llm benchmark..."
+echo "▸ Running reflex-llm benchmark..."
 echo "  Prompt: 'Explain quantum computing in simple terms.'"
 echo ""
 
 # Warmup run
-./build/jetson-llm -m "$MODEL" -p "Hello" -n 1 > /dev/null 2>&1 || true
+./build/reflex-llm -m "$MODEL" -p "Hello" -n 1 > /dev/null 2>&1 || true
 
 # Benchmark: short prompt, 128 token generation
 echo "--- Short generation (128 tokens) ---"
-time ./build/jetson-llm -m "$MODEL" \
+time ./build/reflex-llm -m "$MODEL" \
     -p "Explain quantum computing in simple terms." \
     -n 128 2>&1 | grep -E '\[engine\]|tok/s|peak|oom'
 
@@ -47,7 +47,7 @@ echo ""
 
 # Benchmark: longer generation (256 tokens)
 echo "--- Long generation (256 tokens) ---"
-time ./build/jetson-llm -m "$MODEL" \
+time ./build/reflex-llm -m "$MODEL" \
     -p "Write a detailed technical tutorial about GPU memory optimization." \
     -n 256 2>&1 | grep -E '\[engine\]|tok/s|peak|oom'
 
@@ -55,7 +55,7 @@ echo ""
 
 # Memory profile during inference
 echo "--- Memory profile ---"
-./build/jetson-llm -m "$MODEL" -p "Test" -n 64 &
+./build/reflex-llm -m "$MODEL" -p "Test" -n 64 &
 PID=$!
 sleep 1
 

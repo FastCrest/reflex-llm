@@ -24,8 +24,8 @@ cmake --build build -j$(nproc)
 
 | Target | Binary | Description |
 |--------|--------|-------------|
-| `jetson-llm` | `build/jetson-llm` | CLI inference |
-| `jetson-llm-server` | `build/jetson-llm-server` | HTTP API server |
+| `reflex-llm` | `build/reflex-llm` | CLI inference |
+| `reflex-llm-server` | `build/reflex-llm-server` | HTTP API server |
 | `test_memory` | `build/test_memory` | Memory subsystem tests |
 | `test_kernels` | `build/test_kernels` | CUDA kernel tests |
 | `test_model_load` | `build/test_model_load` | GGUF loading tests |
@@ -40,6 +40,8 @@ cmake --build build -j$(nproc)
 | `CMAKE_BUILD_TYPE` | `Release` | -O3 optimizations |
 | `CMAKE_CXX_STANDARD` | `17` | Required for structured bindings, constexpr if |
 | `CMAKE_CUDA_STANDARD` | `17` | Match C++ standard |
+| `REFLEX_LLM_BUILD_SERVER` | `OFF` | Build optional HTTP server |
+| `REFLEX_LLM_USE_REFLEX_INFER` | `OFF` | Link external `reflex-infer` kernels when a CMake package is available |
 
 ### Compiler Flags
 
@@ -65,15 +67,15 @@ No external libraries required. All HTTP, JSON, and GGUF parsing is built-in.
 ## Library Architecture
 
 ```
-libjetson_llm_core.a (static library)
+libreflex_llm_core.a (static library)
   ├── src/memory/    (budget, kv_cache, pool)     ← .cpp → g++
   ├── src/jetson/    (power, thermal, sysinfo)    ← .cpp → g++
   ├── src/kernels/   (6 CUDA kernels)             ← .cu  → nvcc
   └── src/engine/    (model, decode, sample, tok)  ← .cpp/.cu → g++/nvcc
 
-jetson-llm          → links libjetson_llm_core.a
-jetson-llm-server   → links libjetson_llm_core.a + http_server.cpp
-test_*              → links libjetson_llm_core.a
+reflex-llm          → links libreflex_llm_core.a
+reflex-llm-server   → links libreflex_llm_core.a + http_server.cpp
+test_*              → links libreflex_llm_core.a
 ```
 
 ## File Types

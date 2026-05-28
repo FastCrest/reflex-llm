@@ -1,7 +1,7 @@
 #!/bin/bash
 # bench_load.sh — cold vs warm model-load timing (issue #4 follow-up).
 #
-# Drops the OS page cache, runs jetson-llm with no prompt (load + unload only),
+# Drops the OS page cache, runs reflex-llm with no prompt (load + unload only),
 # then runs it again warm. Reports load_ms cold/warm/delta and effective MB/s.
 #
 # Requires sudo for /proc/sys/vm/drop_caches.
@@ -17,15 +17,15 @@ if [ -z "$MODEL" ] || [ ! -f "$MODEL" ]; then
     echo "Usage: $0 <model.gguf>" >&2
     exit 1
 fi
-if [ ! -x ./build/jetson-llm ]; then
-    echo "ERROR: ./build/jetson-llm not found. Build first." >&2
+if [ ! -x ./build/reflex-llm ]; then
+    echo "ERROR: ./build/reflex-llm not found. Build first." >&2
     exit 1
 fi
 
 SIZE_MB=$(( $(stat -c%s "$MODEL") / 1024 / 1024 ))
 
 echo "═══════════════════════════════════════════════════"
-echo "  jetson-llm load-time bench"
+echo "  reflex-llm load-time bench"
 echo "═══════════════════════════════════════════════════"
 echo "  Model:   $MODEL ($SIZE_MB MB)"
 echo "  Power:   $(sudo nvpmodel -q 2>/dev/null | head -1 || echo 'unknown')"
@@ -36,7 +36,7 @@ echo
 run_one() {
     local label="$1"
     local out load_ms mbs
-    out=$(./build/jetson-llm -m "$MODEL" 2>&1 || true)
+    out=$(./build/reflex-llm -m "$MODEL" 2>&1 || true)
     load_ms=$(echo "$out" | awk '/\[engine\] Model loaded in/{print $5; exit}')
     mbs=$(echo "$out" | awk '/\[engine\] Model loaded in/{gsub(/[()]/,""); print $7; exit}')
     if [ -z "$load_ms" ]; then load_ms="?"; fi

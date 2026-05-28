@@ -2,14 +2,25 @@
 
 ## Overview
 
-jetson-llm is a memory-first LLM inference runtime targeting NVIDIA Jetson Orin exclusively. It runs autoregressive transformer models (Llama, Phi, Gemma, Qwen, etc.) from GGUF format files.
+`reflex-llm` is a memory-first LLM inference runtime targeting NVIDIA Jetson
+devices. It runs autoregressive transformer models from GGUF format files and
+owns the runtime layer: model loading, tokenizer state, memory budget, KV-cache
+lifecycle, sampling, CLI/server surfaces, and application integration.
+
+CUDA kernels are being extracted into `reflex-infer`. In the long-term design,
+`reflex-llm` depends on `reflex-infer` for optimized Jetson kernels instead of
+owning all low-level CUDA implementations directly.
+
+Initial target: Jetson Orin Nano 8GB with Qwen 3.5B or Qwen3 4B class Q4
+models. Later targets include Orin NX 16GB, AGX Orin 64GB, Thor, and additional
+model families such as Phi-4.
 
 ```
 User prompt (text)
       │
       ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                        CLI / HTTP Server                     │
+│                    reflex-llm CLI / HTTP Server              │
 │  main.cpp: parse args, probe system, pre-check memory       │
 │  http_server.cpp: /v1/chat/completions, /health, /v1/models │
 └─────────────────────────┬───────────────────────────────────┘
@@ -37,7 +48,7 @@ User prompt (text)
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                     CUDA Kernels (SM 8.7)                    │
+│          CUDA Kernels (legacy in-repo, moving to reflex-infer)│
 │                                                              │
 │  gemv_q4        INT4 dequant-fused GEMV (38% of decode)     │
 │  attention      Flash attention decode, online softmax       │
@@ -71,7 +82,7 @@ User prompt (text)
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│              Jetson Orin Nano Super Hardware                  │
+│              Jetson Orin Nano / Orin-family Hardware          │
 │                                                              │
 │  1024 CUDA cores (8 SMs × 128)  │  102 GB/s LPDDR5         │
 │  32 Tensor Cores                  │  8 GB unified memory     │
@@ -91,11 +102,12 @@ On Jetson, CPU and GPU share the same 8 GB LPDDR5. Every byte for the model is a
 - `OOMGuard` checks real `/proc/meminfo` before every KV cache extension
 - Generation stops gracefully on memory pressure (no crash, no OOM killer)
 
-### 2. Orin-Only
+### 2. Jetson-First
 
-No code paths for x86, desktop GPUs, or multi-GPU. The default profile is
-tuned for the validated Orin Nano Super SM 8.7 target with 48 KB shared memory
-and 8 SMs, while runtime probes report the actual SKU details at startup.
+No code paths for x86, desktop GPUs, or multi-GPU in the first runtime path.
+The default profile is tuned for the validated Orin Nano SM 8.7 target, while
+runtime probes report the actual SKU details at startup. Future Jetson SKUs
+should be selected through explicit hardware profiles, not hidden heuristics.
 
 ### 3. Pre-Allocated Decode Pools
 
@@ -122,6 +134,21 @@ The runtime adapts to Jetson's power constraints:
 - Monitors thermal zones during generation
 - Backs off (inserts delays) before hardware thermal throttling triggers
 - Reports power mode, temperature, and utilization in health endpoint
+
+### 6. Kernel/Runtime Boundary
+
+The runtime must not bake every kernel decision directly into the transformer
+loop. The intended boundary is:
+
+- `reflex-llm` describes model shape, quantization layout, KV-cache layout,
+  workspace, stream, and target hardware profile.
+- `reflex-infer` selects and launches the best supported kernel for that
+  operator and target.
+- Unsupported model/hardware/quantization combinations must fall back to a
+  known-correct runtime path.
+
+This is the boundary that lets `reflex-infer` grow into a Jetson-only kernel
+library without turning `reflex-llm` into a monolithic benchmark project.
 
 ## Data Flow — One Token
 
@@ -164,7 +191,7 @@ include/
 
 src/memory/         Memory management (budget, KV cache, scratch pool)
 src/jetson/         Hardware abstraction (power, thermal, sysinfo)
-src/kernels/        CUDA kernels (all .cu files, SM 8.7 only)
+src/kernels/        Legacy CUDA kernels, extraction candidates for reflex-infer
 src/engine/         Model loading, forward pass, sampling, tokenizer
 src/server/         HTTP API server
 src/main.cpp        CLI entry point

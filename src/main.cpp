@@ -1,5 +1,5 @@
 // main.cpp — Jetson LLM Runtime CLI
-// Usage: jetson-llm -m model.gguf [-c context] [-n max_tokens] [-p prompt]
+// Usage: reflex-llm -m model.gguf [-c context] [-n max_tokens] [-p prompt]
 
 #include "jllm.h"
 #include <cstdio>
@@ -95,13 +95,13 @@ Args parse_args(int argc, char** argv) {
 #ifndef JLLM_VERSION
 #define JLLM_VERSION "dev"
 #endif
-            fprintf(stdout, "genie-ai-runtime / jetson-llm %s\n", JLLM_VERSION);
+            fprintf(stdout, "reflex-llm %s\n", JLLM_VERSION);
             exit(0);
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
             fprintf(stderr,
-                "jetson-llm — Memory-first LLM runtime for Jetson Orin\n\n"
-                "Usage: jetson-llm -m model.gguf [options]\n\n"
+                "reflex-llm — Memory-first LLM runtime for Jetson Orin\n\n"
+                "Usage: reflex-llm -m model.gguf [options]\n\n"
                 "Options:\n"
                 "  -m PATH    GGUF model file (required)\n"
                 "  -p TEXT    Prompt text\n"

@@ -23,7 +23,7 @@ dim=2560, head_dim=128, vocab=151936, rms_eps=1e-06, rope=neox
 ## Command
 
 ```bash
-./build/jetson-llm \
+./build/reflex-llm \
   -m /opt/geniepod/models/Qwen3-4B-Q4_K_M.gguf \
   -p "Hello, this is testing." \
   -n 64 -v

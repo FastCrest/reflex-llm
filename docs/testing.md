@@ -138,12 +138,12 @@ Phase 7: Thermal (2 tests)  — temperature, throttling
 
 1. Check tensor offsets: `./build/test_model_load model.gguf` — look at Test 7
 2. Inspect actual tensor names vs expected patterns (see `docs/gguf.md`)
-3. Profile: `nsys profile ./build/jetson-llm -m model.gguf -p "Hi" -n 5`
+3. Profile: `nsys profile ./build/reflex-llm -m model.gguf -p "Hi" -n 5`
 
 ### Segfault
 
 1. Check null weight pointers: Test 7 output shows `(nil)` for unmapped tensors
-2. Run with: `cuda-memcheck ./build/jetson-llm -m model.gguf -p "Hi" -n 5`
+2. Run with: `cuda-memcheck ./build/reflex-llm -m model.gguf -p "Hi" -n 5`
 
 ### OOM
 

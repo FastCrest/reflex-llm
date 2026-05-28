@@ -5,14 +5,14 @@
 MODEL=${1:-"model.gguf"}
 OUTPUT="profile_$(date +%Y%m%d_%H%M%S)"
 
-echo "Profiling jetson-llm with Nsight Systems..."
+echo "Profiling reflex-llm with Nsight Systems..."
 echo "Output: ${OUTPUT}.nsys-rep"
 
 nsys profile \
     --trace=cuda,nvtx,osrt \
     --cuda-memory-usage=true \
     --output="$OUTPUT" \
-    ./build/jetson-llm -m "$MODEL" -p "Hello, how are you?" -n 64
+    ./build/reflex-llm -m "$MODEL" -p "Hello, how are you?" -n 64
 
 echo ""
 echo "▸ Top kernels by time:"

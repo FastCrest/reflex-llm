@@ -111,7 +111,7 @@ void print_jetson_info(const JetsonInfo& info) {
 #endif
     fprintf(stderr,
         "╔══════════════════════════════════════╗\n"
-        "║   genie-ai-runtime v%-16s ║\n"
+        "║   reflex-llm v%-22s ║\n"
         "╠══════════════════════════════════════╣\n",
         JLLM_VERSION);
     fprintf(stderr,
