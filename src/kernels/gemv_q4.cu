@@ -1992,6 +1992,10 @@ static reflex::infer::StreamHandle reflex_stream(cudaStream_t stream) {
     return reinterpret_cast<reflex::infer::StreamHandle>(stream);
 }
 
+static const void* reflex_weight_device_ptr(const void* weights) {
+    return resolve_weight_device_ptr(weights);
+}
+
 static bool has_registered_q4_backend(const reflex::infer::Q4Kernels& kernels) {
     return kernels.gemv_quant ||
            kernels.gemv_quant_add ||
@@ -2090,6 +2094,7 @@ void gemm_quant_batched(half* y, const void* W, int ggml_type, const half* x,
     reflex::infer::GemmQuantBatchedArgs args{};
     args.y = y;
     args.weights = W;
+    args.weights_device = reflex_weight_device_ptr(W);
     args.ggml_type = ggml_type;
     args.x = x;
     args.M = M;
@@ -2110,6 +2115,7 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
     reflex::infer::GemvQuantArgs args{};
     args.y = y;
     args.weights = W;
+    args.weights_device = reflex_weight_device_ptr(W);
     args.ggml_type = ggml_type;
     args.x = x;
     args.M = M;
@@ -2129,6 +2135,7 @@ void gemv_quant_add(half* y, const void* W, int ggml_type, const half* x,
     reflex::infer::GemvQuantAddArgs args{};
     args.y = y;
     args.weights = W;
+    args.weights_device = reflex_weight_device_ptr(W);
     args.ggml_type = ggml_type;
     args.x = x;
     args.residual = residual;
@@ -2152,10 +2159,12 @@ void gemv_quant_pair(
     reflex::infer::GemvQuantPairArgs args{};
     args.y0 = y0;
     args.weights0 = W0;
+    args.weights0_device = reflex_weight_device_ptr(W0);
     args.ggml_type0 = ggml_type0;
     args.M0 = M0;
     args.y1 = y1;
     args.weights1 = W1;
+    args.weights1_device = reflex_weight_device_ptr(W1);
     args.ggml_type1 = ggml_type1;
     args.M1 = M1;
     args.x = x;
@@ -2180,14 +2189,17 @@ void gemv_quant_triple(
     reflex::infer::GemvQuantTripleArgs args{};
     args.y0 = y0;
     args.weights0 = W0;
+    args.weights0_device = reflex_weight_device_ptr(W0);
     args.ggml_type0 = ggml_type0;
     args.M0 = M0;
     args.y1 = y1;
     args.weights1 = W1;
+    args.weights1_device = reflex_weight_device_ptr(W1);
     args.ggml_type1 = ggml_type1;
     args.M1 = M1;
     args.y2 = y2;
     args.weights2 = W2;
+    args.weights2_device = reflex_weight_device_ptr(W2);
     args.ggml_type2 = ggml_type2;
     args.M2 = M2;
     args.x = x;
@@ -2208,6 +2220,7 @@ void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
     reflex::infer::GemvQuantF32Args args{};
     args.y = y;
     args.weights = W;
+    args.weights_device = reflex_weight_device_ptr(W);
     args.ggml_type = ggml_type;
     args.x = x;
     args.M = M;

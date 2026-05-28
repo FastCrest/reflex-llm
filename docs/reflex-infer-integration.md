@@ -192,6 +192,10 @@ Status gemm_quant_batched(const GemmQuantBatchedArgs& args);
 
 The current stream type is an opaque `void*` so `reflex-infer` can expose the
 dispatch ABI without including CUDA headers in its public interface yet.
+Q4 args carry both the runtime-owned `weights` pointer and the CUDA-visible
+`weights_device` alias. `reflex-llm` fills the alias from its mapped GGUF
+weight resolver, which keeps future `reflex-infer` kernels independent from
+the model loader.
 
 ## Operator Boundary
 
