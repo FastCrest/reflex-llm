@@ -66,6 +66,11 @@ If `../reflex-infer` exists, CMake adds it with `add_subdirectory()` and links
 `reflex::infer`. If not, CMake falls back to `find_package(reflex-infer CONFIG
 REQUIRED)`.
 
+When enabled, the Q4 GGUF K-quant GEMV/GEMM entry points route through the
+`reflex-infer` dispatcher. The current backend is still the existing
+`reflex-llm` CUDA implementation, registered as a fallback until kernels are
+physically extracted into `reflex-infer`.
+
 ### Compiler Flags
 
 ```

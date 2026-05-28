@@ -73,15 +73,18 @@ Phase 2:
 
 - CMake should locate `../reflex-infer` first, then fall back to an installed
   `reflex-infer` package.
-- `reflex-infer` currently exports a minimal `reflex::infer` interface target
-  and `include/reflex/infer.h` capability API. Real fast-path kernels are still
-  disabled until they move out of `reflex-llm` and pass parity tests.
+- `reflex-infer` currently exports a `reflex::infer` CMake target,
+  `include/reflex/infer.h` capability API, and Q4 dispatcher. Real fast-path
+  kernels are still disabled until they move out of `reflex-llm` and pass
+  parity tests.
 
 Phase 3:
 
 - Move Q4 GEMV/MMQ, decode attention, RoPE, norm, and KV conversion behind a
   `reflex-infer` dispatch layer.
 - Keep the old in-repo kernels as fallback until the external path is stable.
+- Current status: Q4 GGUF K-quant GEMV/GEMM calls are dispatcher-wired, with
+  the existing `reflex-llm` CUDA implementation registered as the backend.
 
 Phase 4:
 
@@ -158,6 +161,37 @@ KernelSupport query_support(const HardwareProfile&, const ModelShape&, QuantForm
 
 Exact names can change, but the important design point is capability discovery.
 `reflex-llm` should ask what is supported instead of assuming a kernel exists.
+
+The first concrete dispatcher API is already present in `reflex-infer`:
+
+```cpp
+namespace reflex::infer {
+
+struct GemvQuantArgs;
+struct GemvQuantAddArgs;
+struct GemvQuantPairArgs;
+struct GemvQuantTripleArgs;
+struct GemmQuantBatchedArgs;
+struct GemvQuantF32Args;
+
+struct Q4Kernels {
+    GemvQuantFn gemv_quant;
+    GemvQuantAddFn gemv_quant_add;
+    GemvQuantPairFn gemv_quant_pair;
+    GemvQuantTripleFn gemv_quant_triple;
+    GemmQuantBatchedFn gemm_quant_batched;
+    GemvQuantF32Fn gemv_quant_f32;
+};
+
+void register_q4_backend(const Q4Kernels& kernels) noexcept;
+Status gemv_quant(const GemvQuantArgs& args);
+Status gemm_quant_batched(const GemmQuantBatchedArgs& args);
+
+}  // namespace reflex::infer
+```
+
+The current stream type is an opaque `void*` so `reflex-infer` can expose the
+dispatch ABI without including CUDA headers in its public interface yet.
 
 ## Operator Boundary
 

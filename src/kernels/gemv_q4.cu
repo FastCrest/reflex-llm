@@ -2,6 +2,9 @@
 // Matches llama.cpp's exact Q4_K block layout and dequant formula.
 
 #include "jllm_kernels.h"
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+#include <reflex/infer.h>
+#endif
 #include <cuda_fp16.h>
 #include <cstdio>
 #include <cstdlib>
@@ -11,6 +14,27 @@
 namespace jllm {
 
 static constexpr int QK_K = 256;
+
+static void gemv_quant_impl(half* y, const void* W, int ggml_type,
+                            const half* x, int M, int K, cudaStream_t stream);
+static void gemv_quant_add_impl(half* y, const void* W, int ggml_type,
+                                const half* x, const half* residual,
+                                int M, int K, cudaStream_t stream);
+static void gemv_quant_pair_impl(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    const half* x, int K, cudaStream_t stream);
+static void gemv_quant_triple_impl(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    half* y2, const void* W2, int ggml_type2, int M2,
+    const half* x, int K, cudaStream_t stream);
+static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
+                                    const half* x, int M, int N, int K,
+                                    cudaStream_t stream);
+static void gemv_quant_f32_impl(float* y, const void* W, int ggml_type,
+                                const half* x, int M, int K,
+                                cudaStream_t stream);
 
 static bool debug_kernels_enabled() {
     static const bool enabled = [] {
@@ -1665,13 +1689,14 @@ static bool gemm_quant_batched_gpu(half* y, const void* W, int ggml_type,
     return true;
 }
 
-void gemm_quant_batched(half* y, const void* W, int ggml_type, const half* x,
-                        int M, int N, int K, cudaStream_t stream) {
+static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
+                                    const half* x, int M, int N, int K,
+                                    cudaStream_t stream) {
     // N=1 is just gemv — keep the decode/per-token path bit-identical by
     // routing there. Anything > GEMM_MAX_BATCH is chunked.
     if (N <= 0 || M <= 0 || K <= 0) return;
     if (N == 1) {
-        gemv_quant(y, W, ggml_type, x, M, K, stream);
+        gemv_quant_impl(y, W, ggml_type, x, M, K, stream);
         return;
     }
     if (fast_gemv_enabled()) {
@@ -1692,8 +1717,8 @@ void gemm_quant_batched(half* y, const void* W, int ggml_type, const half* x,
         fprintf(stderr, "[GEMM] batched GPU path failed; falling back to N gemv calls\n");
     }
     for (int t = 0; t < N; t++) {
-        gemv_quant(y + (int64_t)t * M, W, ggml_type, x + (int64_t)t * K,
-                   M, K, stream);
+        gemv_quant_impl(y + (int64_t)t * M, W, ggml_type,
+                        x + (int64_t)t * K, M, K, stream);
     }
 }
 
@@ -1811,8 +1836,9 @@ static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type
     return true;
 }
 
-void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
-                int M, int K, cudaStream_t stream) {
+static void gemv_quant_impl(half* y, const void* W, int ggml_type,
+                            const half* x, int M, int K,
+                            cudaStream_t stream) {
     if (fast_gemv_enabled()) {
         if (gemv_quant_gpu(y, W, ggml_type, x, M, K, stream)) {
             static int dbg_count = 0;
@@ -1868,8 +1894,9 @@ void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
     }
 }
 
-void gemv_quant_add(half* y, const void* W, int ggml_type, const half* x,
-                    const half* residual, int M, int K, cudaStream_t stream) {
+static void gemv_quant_add_impl(half* y, const void* W, int ggml_type,
+                                const half* x, const half* residual,
+                                int M, int K, cudaStream_t stream) {
     if (fast_gemv_enabled()) {
         if (gemv_quant_add_gpu(y, W, ggml_type, x, residual, M, K, stream)) {
             return;
@@ -1898,7 +1925,7 @@ void gemv_quant_add(half* y, const void* W, int ggml_type, const half* x,
     cudaMemcpy(y, h_y.data(), M * sizeof(half), cudaMemcpyHostToDevice);
 }
 
-void gemv_quant_pair(
+static void gemv_quant_pair_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
     const half* x, int K, cudaStream_t stream)
@@ -1910,11 +1937,11 @@ void gemv_quant_pair(
         return;
     }
 
-    gemv_quant(y0, W0, ggml_type0, x, M0, K, stream);
-    gemv_quant(y1, W1, ggml_type1, x, M1, K, stream);
+    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream);
+    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream);
 }
 
-void gemv_quant_triple(
+static void gemv_quant_triple_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
     half* y2, const void* W2, int ggml_type2, int M2,
@@ -1928,13 +1955,14 @@ void gemv_quant_triple(
         return;
     }
 
-    gemv_quant(y0, W0, ggml_type0, x, M0, K, stream);
-    gemv_quant(y1, W1, ggml_type1, x, M1, K, stream);
-    gemv_quant(y2, W2, ggml_type2, x, M2, K, stream);
+    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream);
+    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream);
+    gemv_quant_impl(y2, W2, ggml_type2, x, M2, K, stream);
 }
 
-void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
-                    int M, int K, cudaStream_t stream) {
+static void gemv_quant_f32_impl(float* y, const void* W, int ggml_type,
+                                const half* x, int M, int K,
+                                cudaStream_t stream) {
     if (fast_gemv_enabled()) {
         if (gemv_quant_gpu_f32(y, W, ggml_type, x, M, K, stream)) {
             return;
@@ -1953,6 +1981,243 @@ void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
     }
 
     cudaMemcpy(y, h_y.data(), M * sizeof(float), cudaMemcpyHostToDevice);
+}
+
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+static cudaStream_t cuda_stream(reflex::infer::StreamHandle stream) {
+    return reinterpret_cast<cudaStream_t>(stream);
+}
+
+static reflex::infer::StreamHandle reflex_stream(cudaStream_t stream) {
+    return reinterpret_cast<reflex::infer::StreamHandle>(stream);
+}
+
+static bool has_registered_q4_backend(const reflex::infer::Q4Kernels& kernels) {
+    return kernels.gemv_quant ||
+           kernels.gemv_quant_add ||
+           kernels.gemv_quant_pair ||
+           kernels.gemv_quant_triple ||
+           kernels.gemm_quant_batched ||
+           kernels.gemv_quant_f32;
+}
+
+static reflex::infer::Status reflex_backend_gemv_quant(
+    const reflex::infer::GemvQuantArgs& args) {
+    gemv_quant_impl(static_cast<half*>(args.y), args.weights, args.ggml_type,
+                    static_cast<const half*>(args.x), args.M, args.K,
+                    cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static reflex::infer::Status reflex_backend_gemv_quant_add(
+    const reflex::infer::GemvQuantAddArgs& args) {
+    gemv_quant_add_impl(static_cast<half*>(args.y), args.weights, args.ggml_type,
+                        static_cast<const half*>(args.x),
+                        static_cast<const half*>(args.residual), args.M,
+                        args.K, cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static reflex::infer::Status reflex_backend_gemv_quant_pair(
+    const reflex::infer::GemvQuantPairArgs& args) {
+    gemv_quant_pair_impl(static_cast<half*>(args.y0), args.weights0,
+                         args.ggml_type0, args.M0,
+                         static_cast<half*>(args.y1), args.weights1,
+                         args.ggml_type1, args.M1,
+                         static_cast<const half*>(args.x), args.K,
+                         cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static reflex::infer::Status reflex_backend_gemv_quant_triple(
+    const reflex::infer::GemvQuantTripleArgs& args) {
+    gemv_quant_triple_impl(static_cast<half*>(args.y0), args.weights0,
+                           args.ggml_type0, args.M0,
+                           static_cast<half*>(args.y1), args.weights1,
+                           args.ggml_type1, args.M1,
+                           static_cast<half*>(args.y2), args.weights2,
+                           args.ggml_type2, args.M2,
+                           static_cast<const half*>(args.x), args.K,
+                           cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static reflex::infer::Status reflex_backend_gemm_quant_batched(
+    const reflex::infer::GemmQuantBatchedArgs& args) {
+    gemm_quant_batched_impl(static_cast<half*>(args.y), args.weights,
+                            args.ggml_type, static_cast<const half*>(args.x),
+                            args.M, args.N, args.K,
+                            cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static reflex::infer::Status reflex_backend_gemv_quant_f32(
+    const reflex::infer::GemvQuantF32Args& args) {
+    gemv_quant_f32_impl(args.y, args.weights, args.ggml_type,
+                        static_cast<const half*>(args.x), args.M, args.K,
+                        cuda_stream(args.stream));
+    return reflex::infer::Status::Success;
+}
+
+static void ensure_reflex_infer_q4_backend_registered() {
+    static const bool registered = [] {
+        if (has_registered_q4_backend(reflex::infer::registered_q4_backend())) {
+            return true;
+        }
+
+        reflex::infer::Q4Kernels kernels{};
+        kernels.gemv_quant = reflex_backend_gemv_quant;
+        kernels.gemv_quant_add = reflex_backend_gemv_quant_add;
+        kernels.gemv_quant_pair = reflex_backend_gemv_quant_pair;
+        kernels.gemv_quant_triple = reflex_backend_gemv_quant_triple;
+        kernels.gemm_quant_batched = reflex_backend_gemm_quant_batched;
+        kernels.gemv_quant_f32 = reflex_backend_gemv_quant_f32;
+        reflex::infer::register_q4_backend(kernels);
+        return true;
+    }();
+    (void)registered;
+}
+
+static bool reflex_success(reflex::infer::Status status) {
+    return status == reflex::infer::Status::Success;
+}
+#endif
+
+void gemm_quant_batched(half* y, const void* W, int ggml_type, const half* x,
+                        int M, int N, int K, cudaStream_t stream) {
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemmQuantBatchedArgs args{};
+    args.y = y;
+    args.weights = W;
+    args.ggml_type = ggml_type;
+    args.x = x;
+    args.M = M;
+    args.N = N;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemm_quant_batched(args))) {
+        return;
+    }
+#endif
+    gemm_quant_batched_impl(y, W, ggml_type, x, M, N, K, stream);
+}
+
+void gemv_quant(half* y, const void* W, int ggml_type, const half* x,
+                int M, int K, cudaStream_t stream) {
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemvQuantArgs args{};
+    args.y = y;
+    args.weights = W;
+    args.ggml_type = ggml_type;
+    args.x = x;
+    args.M = M;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemv_quant(args))) {
+        return;
+    }
+#endif
+    gemv_quant_impl(y, W, ggml_type, x, M, K, stream);
+}
+
+void gemv_quant_add(half* y, const void* W, int ggml_type, const half* x,
+                    const half* residual, int M, int K, cudaStream_t stream) {
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemvQuantAddArgs args{};
+    args.y = y;
+    args.weights = W;
+    args.ggml_type = ggml_type;
+    args.x = x;
+    args.residual = residual;
+    args.M = M;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemv_quant_add(args))) {
+        return;
+    }
+#endif
+    gemv_quant_add_impl(y, W, ggml_type, x, residual, M, K, stream);
+}
+
+void gemv_quant_pair(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    const half* x, int K, cudaStream_t stream)
+{
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemvQuantPairArgs args{};
+    args.y0 = y0;
+    args.weights0 = W0;
+    args.ggml_type0 = ggml_type0;
+    args.M0 = M0;
+    args.y1 = y1;
+    args.weights1 = W1;
+    args.ggml_type1 = ggml_type1;
+    args.M1 = M1;
+    args.x = x;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemv_quant_pair(args))) {
+        return;
+    }
+#endif
+    gemv_quant_pair_impl(y0, W0, ggml_type0, M0, y1, W1, ggml_type1, M1,
+                         x, K, stream);
+}
+
+void gemv_quant_triple(
+    half* y0, const void* W0, int ggml_type0, int M0,
+    half* y1, const void* W1, int ggml_type1, int M1,
+    half* y2, const void* W2, int ggml_type2, int M2,
+    const half* x, int K, cudaStream_t stream)
+{
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemvQuantTripleArgs args{};
+    args.y0 = y0;
+    args.weights0 = W0;
+    args.ggml_type0 = ggml_type0;
+    args.M0 = M0;
+    args.y1 = y1;
+    args.weights1 = W1;
+    args.ggml_type1 = ggml_type1;
+    args.M1 = M1;
+    args.y2 = y2;
+    args.weights2 = W2;
+    args.ggml_type2 = ggml_type2;
+    args.M2 = M2;
+    args.x = x;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemv_quant_triple(args))) {
+        return;
+    }
+#endif
+    gemv_quant_triple_impl(y0, W0, ggml_type0, M0, y1, W1, ggml_type1, M1,
+                           y2, W2, ggml_type2, M2, x, K, stream);
+}
+
+void gemv_quant_f32(float* y, const void* W, int ggml_type, const half* x,
+                    int M, int K, cudaStream_t stream) {
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+    ensure_reflex_infer_q4_backend_registered();
+    reflex::infer::GemvQuantF32Args args{};
+    args.y = y;
+    args.weights = W;
+    args.ggml_type = ggml_type;
+    args.x = x;
+    args.M = M;
+    args.K = K;
+    args.stream = reflex_stream(stream);
+    if (reflex_success(reflex::infer::gemv_quant_f32(args))) {
+        return;
+    }
+#endif
+    gemv_quant_f32_impl(y, W, ggml_type, x, M, K, stream);
 }
 
 bool dequant_embedding_row(half* dst, const void* W, int ggml_type,

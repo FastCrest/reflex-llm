@@ -84,6 +84,11 @@ By default CMake looks for `../reflex-infer`. Override with
 `-DREFLEX_INFER_SOURCE_DIR=/path/to/reflex-infer`, or install `reflex-infer`
 as a CMake package.
 
+With `REFLEX_LLM_USE_REFLEX_INFER=ON`, the GGUF K-quant Q4 GEMV/GEMM wrappers
+route through the `reflex-infer` dispatcher. Until external kernels move over,
+`reflex-llm` registers its existing in-repo CUDA implementation as the fallback
+backend.
+
 ## Run
 
 Single prompt:
