@@ -37,9 +37,9 @@ The intended architecture is:
 - `reflex-infer`: Jetson-optimized CUDA kernel library, similar in spirit to
   FlashInfer but scoped to NVIDIA Jetson devices.
 
-`reflex-llm` should use `reflex-infer` as an external dependency once the kernel
-library has a stable C/C++ API. Until then, selected kernels may remain in this
-repo as legacy implementation while their interfaces are extracted.
+`reflex-llm` uses `reflex-infer` as the external kernel dependency. The local
+`src/kernels/` files preserve the runtime ABI and forward extracted operators
+into `reflex-infer`.
 
 The split is documented in [docs/reflex-infer-integration.md](docs/reflex-infer-integration.md).
 
@@ -73,7 +73,8 @@ Server output:
 
 - `build/reflex-llm-server`
 
-To wire the sibling `reflex-infer` checkout:
+`reflex-infer` is required for extracted GEMM and attention kernels. For local
+two-repo development keep it as a sibling checkout:
 
 ```bash
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DREFLEX_LLM_USE_REFLEX_INFER=ON
@@ -84,10 +85,8 @@ By default CMake looks for `../reflex-infer`. Override with
 `-DREFLEX_INFER_SOURCE_DIR=/path/to/reflex-infer`, or install `reflex-infer`
 as a CMake package.
 
-With `REFLEX_LLM_USE_REFLEX_INFER=ON`, the GGUF K-quant Q4 GEMV/GEMM wrappers
-route through the `reflex-infer` dispatcher. Until external kernels move over,
-`reflex-llm` registers its existing in-repo CUDA implementation as the fallback
-backend.
+The GGUF K-quant Q4 GEMV/GEMM wrappers and decode/prefill attention wrappers
+now route into `reflex-infer`.
 
 ## Run
 
@@ -116,7 +115,7 @@ Server:
 | `src/engine/` | GGUF loading, transformer forward pass, tokenizer, sampling |
 | `src/memory/` | memory budget, OOM guard, KV-cache pool, scratch pool |
 | `src/jetson/` | power, thermal, system probe, live stats |
-| `src/kernels/` | legacy in-repo CUDA kernels to migrate into `reflex-infer` |
+| `src/kernels/` | local CUDA kernels plus ABI bridges into `reflex-infer` |
 | `src/persistence/` | persistent KV-cache file format |
 | `src/server/` | optional OpenAI-compatible HTTP server |
 

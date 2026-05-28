@@ -48,7 +48,7 @@ User prompt (text)
                           │
                           ▼
 ┌─────────────────────────────────────────────────────────────┐
-│          CUDA Kernels (legacy in-repo, moving to reflex-infer)│
+│          CUDA Kernels / reflex-infer Bridges                  │
 │                                                              │
 │  gemv_q4        INT4 dequant-fused GEMV (38% of decode)     │
 │  attention      Flash attention decode, online softmax       │
@@ -191,7 +191,7 @@ include/
 
 src/memory/         Memory management (budget, KV cache, scratch pool)
 src/jetson/         Hardware abstraction (power, thermal, sysinfo)
-src/kernels/        Legacy CUDA kernels, extraction candidates for reflex-infer
+src/kernels/        Local CUDA kernels and ABI bridges into reflex-infer
 src/engine/         Model loading, forward pass, sampling, tokenizer
 src/server/         HTTP API server
 src/main.cpp        CLI entry point

@@ -17,7 +17,7 @@ JLLM_FAST_ATTN=0
 
 ## gemv_q4 — GGML K-Quant Dequant-Fused GEMV
 
-**File:** `src/kernels/gemv_q4.cu`
+**File:** `reflex-infer/src/kernels/q4_gemm.cu` (bridge: `src/kernels/gemv_q4.cu`)
 **Validated:** Q4_K, Q5_K, Q6_K tensors inside Qwen3-4B Q4_K_M.
 
 ### What it does
@@ -62,7 +62,7 @@ Dequant:   8 INT4 values from one uint32, multiply by group scale
 
 ## Q4_K uint32 weight loads (Path C, default-on)
 
-**File:** `src/kernels/gemv_q4.cu` (helper: `dot_q4k_row_uint32`,
+**File:** `reflex-infer/src/kernels/q4_gemm.cu` (bridge: `src/kernels/gemv_q4.cu`) (helper: `dot_q4k_row_uint32`,
 kernels: `gemv_quant_add_uint32_q4k_kernel`,
 `gemv_quant_pair_uint32_q4k_kernel`, `gemv_quant_triple_uint32_q4k_kernel`,
 `gemv_quant_triple_uint32_q4k_q4k_q6k_kernel`).
@@ -130,7 +130,7 @@ any deployment that trips a numeric edge case.
 
 ## gemm_quant_batched — K-Quant GEMM for Prefill
 
-**File:** `src/kernels/gemv_q4.cu` (kernels: `gemm_quant_batched_q4k_kernel`,
+**File:** `reflex-infer/src/kernels/q4_gemm.cu` (bridge: `src/kernels/gemv_q4.cu`) (kernels: `gemm_quant_batched_q4k_kernel`,
 `gemm_quant_batched_q5k_kernel`, `gemm_quant_batched_q6k_kernel`).
 **Validated:** All weight matrices in Qwen3-4B Q4_K_M prefill.
 
@@ -212,7 +212,7 @@ alternating zeros in Qwen3 RMSNorm output.
 
 ## attention — Flash Attention Decode
 
-**File:** `src/kernels/attention.cu`
+**File:** `reflex-infer/src/kernels/attention.cu` (bridge: `src/kernels/attention.cu`)
 **Validated:** Qwen3 single-token decode attention with GQA.
 
 ### What it does
@@ -259,7 +259,7 @@ INT8 KV: dequantize on-the-fly in the dot product loop
 
 ## attention (chunked prefill) — Flash Attention for N queries
 
-**File:** `src/kernels/attention.cu` (kernel:
+**File:** `reflex-infer/src/kernels/attention.cu` (bridge: `src/kernels/attention.cu`) (kernel:
 `flash_attention_prefill_batched_kernel`).
 **Validated:** Qwen3 multi-token prefill in Path B.
 

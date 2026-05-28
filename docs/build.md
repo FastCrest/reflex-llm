@@ -41,7 +41,7 @@ cmake --build build -j$(nproc)
 | `CMAKE_CXX_STANDARD` | `17` | Required for structured bindings, constexpr if |
 | `CMAKE_CUDA_STANDARD` | `17` | Match C++ standard |
 | `REFLEX_LLM_BUILD_SERVER` | `OFF` | Build optional HTTP server |
-| `REFLEX_LLM_USE_REFLEX_INFER` | `OFF` | Link external `reflex-infer` kernels when a CMake package is available |
+| `REFLEX_LLM_USE_REFLEX_INFER` | `ON` | Required external `reflex-infer` kernel library |
 | `REFLEX_INFER_SOURCE_DIR` | empty | Optional path to a `reflex-infer` source checkout; defaults to `../reflex-infer` |
 
 ### reflex-infer Wiring
@@ -66,10 +66,10 @@ If `../reflex-infer` exists, CMake adds it with `add_subdirectory()` and links
 `reflex::infer`. If not, CMake falls back to `find_package(reflex-infer CONFIG
 REQUIRED)`.
 
-When enabled, the Q4 GGUF K-quant GEMV/GEMM entry points route through the
-`reflex-infer` dispatcher. The current backend is still the existing
-`reflex-llm` CUDA implementation, registered as a fallback until kernels are
-physically extracted into `reflex-infer`.
+The Q4 GGUF K-quant GEMV/GEMM entry points and attention entry points route
+through `reflex-infer`. The bridge files under `src/kernels/` preserve the
+legacy `jllm` ABI for the engine while the CUDA implementations live in
+`reflex-infer`.
 
 ### Compiler Flags
 
@@ -89,8 +89,10 @@ CUDA: -O3 --use_fast_math --ptxas-options=-v --diag-suppress=177
 Found automatically via CMake:
 - `CUDAToolkit` — provides `CUDA::cudart`, `CUDA::cublas`, include paths
 - `Threads` — pthreads
+- `reflex-infer` — required extracted kernel library, found as `../reflex-infer`
+  or via `find_package(reflex-infer)`
 
-No external libraries required. All HTTP, JSON, and GGUF parsing is built-in.
+HTTP, JSON, and GGUF parsing remain built-in.
 
 ## Library Architecture
 
@@ -98,12 +100,13 @@ No external libraries required. All HTTP, JSON, and GGUF parsing is built-in.
 libreflex_llm_core.a (static library)
   ├── src/memory/    (budget, kv_cache, pool)     ← .cpp → g++
   ├── src/jetson/    (power, thermal, sysinfo)    ← .cpp → g++
-  ├── src/kernels/   (6 CUDA kernels)             ← .cu  → nvcc
+  ├── src/kernels/   (ABI bridges + local kernels)← .cu  → nvcc
   └── src/engine/    (model, decode, sample, tok)  ← .cpp/.cu → g++/nvcc
 
 reflex-llm          → links libreflex_llm_core.a
 reflex-llm-server   → links libreflex_llm_core.a + http_server.cpp
 test_*              → links libreflex_llm_core.a
+reflex_llm_core.a   → links reflex::infer
 ```
 
 ## File Types
@@ -111,9 +114,10 @@ test_*              → links libreflex_llm_core.a
 | Extension | Compiler | Why |
 |-----------|----------|-----|
 | `.cpp` | g++ | No CUDA kernels, no `__global__`, no `half` arithmetic |
-| `.cu` | nvcc | Contains `__global__` kernels, uses `__half2float`, CUDA math |
+| `.cu` | nvcc | Contains local kernels or CUDA-facing bridge functions |
 
 `decode.cu` is `.cu` because it defines `vec_add_kernel` and `fp16_to_fp32_kernel`.
+Q4 GEMM and attention CUDA implementations now live in `reflex-infer`.
 All other engine files are `.cpp` (they call kernel functions but don't define them).
 CUDA headers (`cuda_runtime.h`, `cuda_fp16.h`) are visible to `.cpp` via `CUDAToolkit_INCLUDE_DIRS`.
 

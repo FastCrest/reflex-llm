@@ -51,31 +51,32 @@ find_package(CUDAToolkit REQUIRED)
 find_package(Threads REQUIRED)
 
 option(REFLEX_LLM_USE_REFLEX_INFER
-    "Link the external reflex-infer kernel library when available"
-    OFF)
+    "Link the external reflex-infer kernel library"
+    ON)
+if(NOT REFLEX_LLM_USE_REFLEX_INFER)
+    message(FATAL_ERROR "reflex-llm requires reflex-infer for extracted kernels")
+endif()
 set(REFLEX_INFER_SOURCE_DIR "" CACHE PATH
     "Optional source checkout for reflex-infer; defaults to ../reflex-infer when present")
-if(REFLEX_LLM_USE_REFLEX_INFER)
-    if(REFLEX_INFER_SOURCE_DIR)
-        set(_REFLEX_INFER_SOURCE_DIR "${REFLEX_INFER_SOURCE_DIR}")
-    else()
-        set(_REFLEX_INFER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../reflex-infer")
-    endif()
+if(REFLEX_INFER_SOURCE_DIR)
+    set(_REFLEX_INFER_SOURCE_DIR "${REFLEX_INFER_SOURCE_DIR}")
+else()
+    set(_REFLEX_INFER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../reflex-infer")
+endif()
 
-    if(EXISTS "${_REFLEX_INFER_SOURCE_DIR}/CMakeLists.txt")
-        add_subdirectory(
-            "${_REFLEX_INFER_SOURCE_DIR}"
-            "${CMAKE_BINARY_DIR}/_deps/reflex-infer"
-        )
-        message(STATUS "reflex-infer: using source checkout at ${_REFLEX_INFER_SOURCE_DIR}")
-    else()
-        find_package(reflex-infer CONFIG REQUIRED)
-        message(STATUS "reflex-infer: using installed package")
-    endif()
+if(EXISTS "${_REFLEX_INFER_SOURCE_DIR}/CMakeLists.txt")
+    add_subdirectory(
+        "${_REFLEX_INFER_SOURCE_DIR}"
+        "${CMAKE_BINARY_DIR}/_deps/reflex-infer"
+    )
+    message(STATUS "reflex-infer: using source checkout at ${_REFLEX_INFER_SOURCE_DIR}")
+else()
+    find_package(reflex-infer CONFIG REQUIRED)
+    message(STATUS "reflex-infer: using installed package")
+endif()
 
-    if(NOT TARGET reflex::infer)
-        message(FATAL_ERROR "reflex-infer did not provide target reflex::infer")
-    endif()
+if(NOT TARGET reflex::infer)
+    message(FATAL_ERROR "reflex-infer did not provide target reflex::infer")
 endif()
 
 # Make CUDA headers visible to .cpp files (they include cuda_runtime.h)
@@ -129,10 +130,8 @@ target_include_directories(reflex_llm_core PUBLIC include)
 target_link_libraries(reflex_llm_core PUBLIC
     CUDA::cudart CUDA::cublas Threads::Threads
 )
-if(REFLEX_LLM_USE_REFLEX_INFER)
-    target_link_libraries(reflex_llm_core PUBLIC reflex::infer)
-    target_compile_definitions(reflex_llm_core PUBLIC REFLEX_LLM_USE_REFLEX_INFER=1)
-endif()
+target_link_libraries(reflex_llm_core PUBLIC reflex::infer)
+target_compile_definitions(reflex_llm_core PUBLIC REFLEX_LLM_USE_REFLEX_INFER=1)
 
 # Apply host LTO only when supported. Skipping for CUDA targets
 # (gemv_q4.cu et al.) intentionally — see the IPO comment above.

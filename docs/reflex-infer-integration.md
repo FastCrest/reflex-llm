@@ -57,7 +57,8 @@ conversation persistence.
 
 Phase 1:
 
-- Keep current legacy kernels in `reflex-llm/src/kernels`.
+- Keep current legacy kernels in `reflex-llm/src/kernels` while API prototypes
+  are shaped.
 - Add standalone `reflex-infer` microbenchmarks and API prototypes.
 - Compare kernel outputs against the runtime's current path.
 
@@ -74,17 +75,16 @@ Phase 2:
 - CMake should locate `../reflex-infer` first, then fall back to an installed
   `reflex-infer` package.
 - `reflex-infer` currently exports a `reflex::infer` CMake target,
-  `include/reflex/infer.h` capability API, and Q4 dispatcher. Real fast-path
-  kernels are still disabled until they move out of `reflex-llm` and pass
-  parity tests.
+  `include/reflex/infer.h` capability API, Q4 dispatcher, and CUDA kernels for
+  Q4 GEMV/GEMM plus attention.
 
 Phase 3:
 
 - Move Q4 GEMV/MMQ, decode attention, RoPE, norm, and KV conversion behind a
   `reflex-infer` dispatch layer.
-- Keep the old in-repo kernels as fallback until the external path is stable.
-- Current status: Q4 GGUF K-quant GEMV/GEMM calls are dispatcher-wired, with
-  the existing `reflex-llm` CUDA implementation registered as the backend.
+- Current status: Q4 GGUF K-quant GEMV/GEMM and decode/prefill attention are
+  physically extracted into `reflex-infer`; `reflex-llm` keeps bridge wrappers
+  for its legacy `jllm` ABI.
 
 Phase 4:
 
@@ -196,8 +196,8 @@ Q4 args carry both the runtime-owned `weights` pointer and the CUDA-visible
 `weights_device` alias. `reflex-llm` fills the alias from its mapped GGUF
 weight resolver, which keeps future `reflex-infer` kernels independent from
 the model loader.
-The current fallback backend consumes that alias directly before falling back
-to the legacy resolver path.
+The extracted Q4 backend consumes that alias directly before falling back to
+CUDA pointer-attribute checks.
 
 ## Operator Boundary
 
@@ -252,8 +252,7 @@ a rewrite of the runtime.
 
 Every `reflex-infer` fast path needs one of:
 
-- a runtime fallback kernel in `reflex-llm`;
-- a simple reference CUDA path;
+- a simple reference CUDA path in `reflex-infer`;
 - a CPU/PyTorch/offline test reference for validation.
 
 No fast path should be the only correctness path until it has soak coverage.
