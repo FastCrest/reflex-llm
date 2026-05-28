@@ -53,8 +53,29 @@ find_package(Threads REQUIRED)
 option(REFLEX_LLM_USE_REFLEX_INFER
     "Link the external reflex-infer kernel library when available"
     OFF)
+set(REFLEX_INFER_SOURCE_DIR "" CACHE PATH
+    "Optional source checkout for reflex-infer; defaults to ../reflex-infer when present")
 if(REFLEX_LLM_USE_REFLEX_INFER)
-    find_package(reflex-infer CONFIG REQUIRED)
+    if(REFLEX_INFER_SOURCE_DIR)
+        set(_REFLEX_INFER_SOURCE_DIR "${REFLEX_INFER_SOURCE_DIR}")
+    else()
+        set(_REFLEX_INFER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../reflex-infer")
+    endif()
+
+    if(EXISTS "${_REFLEX_INFER_SOURCE_DIR}/CMakeLists.txt")
+        add_subdirectory(
+            "${_REFLEX_INFER_SOURCE_DIR}"
+            "${CMAKE_BINARY_DIR}/_deps/reflex-infer"
+        )
+        message(STATUS "reflex-infer: using source checkout at ${_REFLEX_INFER_SOURCE_DIR}")
+    else()
+        find_package(reflex-infer CONFIG REQUIRED)
+        message(STATUS "reflex-infer: using installed package")
+    endif()
+
+    if(NOT TARGET reflex::infer)
+        message(FATAL_ERROR "reflex-infer did not provide target reflex::infer")
+    endif()
 endif()
 
 # Make CUDA headers visible to .cpp files (they include cuda_runtime.h)

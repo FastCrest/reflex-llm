@@ -7,6 +7,10 @@
 #include <string>
 #include <signal.h>
 
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+#include <reflex/infer.h>
+#endif
+
 namespace jllm {
 void run_server(Engine& engine, int port, bool default_kv_int8);
 }
@@ -34,7 +38,11 @@ int main(int argc, char** argv) {
 #ifndef JLLM_VERSION
 #define JLLM_VERSION "dev"
 #endif
-            fprintf(stdout, "reflex-llm-server %s\n", JLLM_VERSION);
+            fprintf(stdout, "reflex-llm-server %s", JLLM_VERSION);
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+            fprintf(stdout, " (reflex-infer %s)", reflex::infer::version_string());
+#endif
+            fprintf(stdout, "\n");
             return 0;
         }
         else if (strcmp(argv[i], "-h") == 0) {

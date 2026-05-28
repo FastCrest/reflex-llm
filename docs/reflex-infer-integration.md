@@ -73,6 +73,9 @@ Phase 2:
 
 - CMake should locate `../reflex-infer` first, then fall back to an installed
   `reflex-infer` package.
+- `reflex-infer` currently exports a minimal `reflex::infer` interface target
+  and `include/reflex/infer.h` capability API. Real fast-path kernels are still
+  disabled until they move out of `reflex-llm` and pass parity tests.
 
 Phase 3:
 

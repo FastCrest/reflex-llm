@@ -73,6 +73,17 @@ Server output:
 
 - `build/reflex-llm-server`
 
+To wire the sibling `reflex-infer` checkout:
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release -DREFLEX_LLM_USE_REFLEX_INFER=ON
+cmake --build build -j$(nproc)
+```
+
+By default CMake looks for `../reflex-infer`. Override with
+`-DREFLEX_INFER_SOURCE_DIR=/path/to/reflex-infer`, or install `reflex-infer`
+as a CMake package.
+
 ## Run
 
 Single prompt:

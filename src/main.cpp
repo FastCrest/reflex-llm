@@ -11,6 +11,10 @@
 #include <signal.h>
 #include <unistd.h>
 
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+#include <reflex/infer.h>
+#endif
+
 static jllm::Engine* g_engine = nullptr;
 
 void signal_handler(int sig) {
@@ -95,7 +99,11 @@ Args parse_args(int argc, char** argv) {
 #ifndef JLLM_VERSION
 #define JLLM_VERSION "dev"
 #endif
-            fprintf(stdout, "reflex-llm %s\n", JLLM_VERSION);
+            fprintf(stdout, "reflex-llm %s", JLLM_VERSION);
+#ifdef REFLEX_LLM_USE_REFLEX_INFER
+            fprintf(stdout, " (reflex-infer %s)", reflex::infer::version_string());
+#endif
+            fprintf(stdout, "\n");
             exit(0);
         }
         else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {

@@ -42,6 +42,29 @@ cmake --build build -j$(nproc)
 | `CMAKE_CUDA_STANDARD` | `17` | Match C++ standard |
 | `REFLEX_LLM_BUILD_SERVER` | `OFF` | Build optional HTTP server |
 | `REFLEX_LLM_USE_REFLEX_INFER` | `OFF` | Link external `reflex-infer` kernels when a CMake package is available |
+| `REFLEX_INFER_SOURCE_DIR` | empty | Optional path to a `reflex-infer` source checkout; defaults to `../reflex-infer` |
+
+### reflex-infer Wiring
+
+For local two-repo development, keep the checkouts as siblings:
+
+```text
+learning/reflex-llm
+learning/reflex-infer
+```
+
+Then configure:
+
+```bash
+cmake -B build \
+  -DCMAKE_CUDA_ARCHITECTURES="87" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DREFLEX_LLM_USE_REFLEX_INFER=ON
+```
+
+If `../reflex-infer` exists, CMake adds it with `add_subdirectory()` and links
+`reflex::infer`. If not, CMake falls back to `find_package(reflex-infer CONFIG
+REQUIRED)`.
 
 ### Compiler Flags
 
