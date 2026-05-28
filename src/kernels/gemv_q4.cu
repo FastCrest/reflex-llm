@@ -16,25 +16,34 @@ namespace jllm {
 static constexpr int QK_K = 256;
 
 static void gemv_quant_impl(half* y, const void* W, int ggml_type,
-                            const half* x, int M, int K, cudaStream_t stream);
+                            const half* x, int M, int K, cudaStream_t stream,
+                            const void* W_device_alias = nullptr);
 static void gemv_quant_add_impl(half* y, const void* W, int ggml_type,
                                 const half* x, const half* residual,
-                                int M, int K, cudaStream_t stream);
+                                int M, int K, cudaStream_t stream,
+                                const void* W_device_alias = nullptr);
 static void gemv_quant_pair_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
-    const half* x, int K, cudaStream_t stream);
+    const half* x, int K, cudaStream_t stream,
+    const void* W0_device_alias = nullptr,
+    const void* W1_device_alias = nullptr);
 static void gemv_quant_triple_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
     half* y2, const void* W2, int ggml_type2, int M2,
-    const half* x, int K, cudaStream_t stream);
+    const half* x, int K, cudaStream_t stream,
+    const void* W0_device_alias = nullptr,
+    const void* W1_device_alias = nullptr,
+    const void* W2_device_alias = nullptr);
 static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
                                     const half* x, int M, int N, int K,
-                                    cudaStream_t stream);
+                                    cudaStream_t stream,
+                                    const void* W_device_alias = nullptr);
 static void gemv_quant_f32_impl(float* y, const void* W, int ggml_type,
                                 const half* x, int M, int K,
-                                cudaStream_t stream);
+                                cudaStream_t stream,
+                                const void* W_device_alias = nullptr);
 
 static bool debug_kernels_enabled() {
     static const bool enabled = [] {
@@ -123,6 +132,11 @@ static const void* resolve_weight_device_ptr(const void* W) {
 #endif
 
     return nullptr;
+}
+
+static const void* weight_device_or_resolve(const void* W,
+                                            const void* W_device_alias) {
+    return W_device_alias ? W_device_alias : resolve_weight_device_ptr(W);
 }
 
 static int gemv_rows_per_block() {
@@ -985,9 +999,10 @@ void gemv_q4(half* y, const void* W_q4, const half* scales, const half* x,
     gemv_quant(y, W_q4, 12, x, M, K, stream);
 }
 
-static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
-                           const half* x, int M, int K, cudaStream_t stream) {
-    const void* W_device = resolve_weight_device_ptr(W);
+static bool gemv_quant_gpu(half* y, const void* W, const void* W_device_alias,
+                           int ggml_type, const half* x, int M, int K,
+                           cudaStream_t stream) {
+    const void* W_device = weight_device_or_resolve(W, W_device_alias);
     if (!W_device) {
         static bool warned = false;
         if (!warned) {
@@ -1030,9 +1045,11 @@ static bool gemv_quant_gpu(half* y, const void* W, int ggml_type,
     return true;
 }
 
-static bool gemv_quant_gpu_f32(float* y, const void* W, int ggml_type,
-                               const half* x, int M, int K, cudaStream_t stream) {
-    const void* W_device = resolve_weight_device_ptr(W);
+static bool gemv_quant_gpu_f32(float* y, const void* W,
+                               const void* W_device_alias, int ggml_type,
+                               const half* x, int M, int K,
+                               cudaStream_t stream) {
+    const void* W_device = weight_device_or_resolve(W, W_device_alias);
     if (!W_device) {
         return false;
     }
@@ -1073,12 +1090,12 @@ static bool supported_gpu_type(int ggml_type) {
 }
 
 static bool gemv_quant_pair_gpu(
-    half* y0, const void* W0, int type0, int M0,
-    half* y1, const void* W1, int type1, int M1,
+    half* y0, const void* W0, const void* W0_device_alias, int type0, int M0,
+    half* y1, const void* W1, const void* W1_device_alias, int type1, int M1,
     const half* x, int K, cudaStream_t stream)
 {
-    const void* W0_device = resolve_weight_device_ptr(W0);
-    const void* W1_device = resolve_weight_device_ptr(W1);
+    const void* W0_device = weight_device_or_resolve(W0, W0_device_alias);
+    const void* W1_device = weight_device_or_resolve(W1, W1_device_alias);
     if (!W0_device || !W1_device ||
         !supported_gpu_type(type0) || !supported_gpu_type(type1)) {
         return false;
@@ -1127,14 +1144,14 @@ static bool gemv_quant_pair_gpu(
 }
 
 static bool gemv_quant_triple_gpu(
-    half* y0, const void* W0, int type0, int M0,
-    half* y1, const void* W1, int type1, int M1,
-    half* y2, const void* W2, int type2, int M2,
+    half* y0, const void* W0, const void* W0_device_alias, int type0, int M0,
+    half* y1, const void* W1, const void* W1_device_alias, int type1, int M1,
+    half* y2, const void* W2, const void* W2_device_alias, int type2, int M2,
     const half* x, int K, cudaStream_t stream)
 {
-    const void* W0_device = resolve_weight_device_ptr(W0);
-    const void* W1_device = resolve_weight_device_ptr(W1);
-    const void* W2_device = resolve_weight_device_ptr(W2);
+    const void* W0_device = weight_device_or_resolve(W0, W0_device_alias);
+    const void* W1_device = weight_device_or_resolve(W1, W1_device_alias);
+    const void* W2_device = weight_device_or_resolve(W2, W2_device_alias);
     if (!W0_device || !W1_device || !W2_device ||
         !supported_gpu_type(type0) || !supported_gpu_type(type1) ||
         !supported_gpu_type(type2)) {
@@ -1200,10 +1217,11 @@ static bool gemv_quant_triple_gpu(
     return true;
 }
 
-static bool gemv_quant_add_gpu(half* y, const void* W, int ggml_type,
+static bool gemv_quant_add_gpu(half* y, const void* W,
+                               const void* W_device_alias, int ggml_type,
                                const half* x, const half* residual,
                                int M, int K, cudaStream_t stream) {
-    const void* W_device = resolve_weight_device_ptr(W);
+    const void* W_device = weight_device_or_resolve(W, W_device_alias);
     if (!W_device || !supported_gpu_type(ggml_type)) {
         return false;
     }
@@ -1621,10 +1639,11 @@ __global__ void gemm_mmq_q4k_kernel(half*             __restrict__ y,
     }
 }
 
-static bool gemm_quant_batched_gpu(half* y, const void* W, int ggml_type,
+static bool gemm_quant_batched_gpu(half* y, const void* W,
+                                   const void* W_device_alias, int ggml_type,
                                    const half* x, int M, int N, int K,
                                    cudaStream_t stream) {
-    const void* W_device = resolve_weight_device_ptr(W);
+    const void* W_device = weight_device_or_resolve(W, W_device_alias);
     if (!W_device || !supported_gpu_type(ggml_type)) {
         return false;
     }
@@ -1691,12 +1710,13 @@ static bool gemm_quant_batched_gpu(half* y, const void* W, int ggml_type,
 
 static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
                                     const half* x, int M, int N, int K,
-                                    cudaStream_t stream) {
+                                    cudaStream_t stream,
+                                    const void* W_device_alias) {
     // N=1 is just gemv — keep the decode/per-token path bit-identical by
     // routing there. Anything > GEMM_MAX_BATCH is chunked.
     if (N <= 0 || M <= 0 || K <= 0) return;
     if (N == 1) {
-        gemv_quant_impl(y, W, ggml_type, x, M, K, stream);
+        gemv_quant_impl(y, W, ggml_type, x, M, K, stream, W_device_alias);
         return;
     }
     if (fast_gemv_enabled()) {
@@ -1707,7 +1727,7 @@ static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
             if (chunk > GEMM_MAX_BATCH) chunk = GEMM_MAX_BATCH;
             ok = gemm_quant_batched_gpu(
                 y + (int64_t)processed * M,
-                W, ggml_type,
+                W, W_device_alias, ggml_type,
                 x + (int64_t)processed * K,
                 M, chunk, K, stream);
             processed += chunk;
@@ -1718,7 +1738,8 @@ static void gemm_quant_batched_impl(half* y, const void* W, int ggml_type,
     }
     for (int t = 0; t < N; t++) {
         gemv_quant_impl(y + (int64_t)t * M, W, ggml_type,
-                        x + (int64_t)t * K, M, K, stream);
+                        x + (int64_t)t * K, M, K, stream,
+                        W_device_alias);
     }
 }
 
@@ -1838,9 +1859,11 @@ static bool gemv_quant_cpu(std::vector<float>& h_y, const void* W, int ggml_type
 
 static void gemv_quant_impl(half* y, const void* W, int ggml_type,
                             const half* x, int M, int K,
-                            cudaStream_t stream) {
+                            cudaStream_t stream,
+                            const void* W_device_alias) {
     if (fast_gemv_enabled()) {
-        if (gemv_quant_gpu(y, W, ggml_type, x, M, K, stream)) {
+        if (gemv_quant_gpu(y, W, W_device_alias, ggml_type, x, M, K,
+                           stream)) {
             static int dbg_count = 0;
             if (debug_kernels_enabled() && dbg_count < 3) {
                 cudaError_t err = cudaStreamSynchronize(stream);
@@ -1896,9 +1919,11 @@ static void gemv_quant_impl(half* y, const void* W, int ggml_type,
 
 static void gemv_quant_add_impl(half* y, const void* W, int ggml_type,
                                 const half* x, const half* residual,
-                                int M, int K, cudaStream_t stream) {
+                                int M, int K, cudaStream_t stream,
+                                const void* W_device_alias) {
     if (fast_gemv_enabled()) {
-        if (gemv_quant_add_gpu(y, W, ggml_type, x, residual, M, K, stream)) {
+        if (gemv_quant_add_gpu(y, W, W_device_alias, ggml_type, x, residual,
+                               M, K, stream)) {
             return;
         }
     }
@@ -1928,43 +1953,55 @@ static void gemv_quant_add_impl(half* y, const void* W, int ggml_type,
 static void gemv_quant_pair_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
-    const half* x, int K, cudaStream_t stream)
+    const half* x, int K, cudaStream_t stream,
+    const void* W0_device_alias,
+    const void* W1_device_alias)
 {
     if (fast_gemv_enabled() &&
-        gemv_quant_pair_gpu(y0, W0, ggml_type0, M0,
-                            y1, W1, ggml_type1, M1,
+        gemv_quant_pair_gpu(y0, W0, W0_device_alias, ggml_type0, M0,
+                            y1, W1, W1_device_alias, ggml_type1, M1,
                             x, K, stream)) {
         return;
     }
 
-    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream);
-    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream);
+    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream,
+                    W0_device_alias);
+    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream,
+                    W1_device_alias);
 }
 
 static void gemv_quant_triple_impl(
     half* y0, const void* W0, int ggml_type0, int M0,
     half* y1, const void* W1, int ggml_type1, int M1,
     half* y2, const void* W2, int ggml_type2, int M2,
-    const half* x, int K, cudaStream_t stream)
+    const half* x, int K, cudaStream_t stream,
+    const void* W0_device_alias,
+    const void* W1_device_alias,
+    const void* W2_device_alias)
 {
     if (fast_gemv_enabled() &&
-        gemv_quant_triple_gpu(y0, W0, ggml_type0, M0,
-                              y1, W1, ggml_type1, M1,
-                              y2, W2, ggml_type2, M2,
+        gemv_quant_triple_gpu(y0, W0, W0_device_alias, ggml_type0, M0,
+                              y1, W1, W1_device_alias, ggml_type1, M1,
+                              y2, W2, W2_device_alias, ggml_type2, M2,
                               x, K, stream)) {
         return;
     }
 
-    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream);
-    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream);
-    gemv_quant_impl(y2, W2, ggml_type2, x, M2, K, stream);
+    gemv_quant_impl(y0, W0, ggml_type0, x, M0, K, stream,
+                    W0_device_alias);
+    gemv_quant_impl(y1, W1, ggml_type1, x, M1, K, stream,
+                    W1_device_alias);
+    gemv_quant_impl(y2, W2, ggml_type2, x, M2, K, stream,
+                    W2_device_alias);
 }
 
 static void gemv_quant_f32_impl(float* y, const void* W, int ggml_type,
                                 const half* x, int M, int K,
-                                cudaStream_t stream) {
+                                cudaStream_t stream,
+                                const void* W_device_alias) {
     if (fast_gemv_enabled()) {
-        if (gemv_quant_gpu_f32(y, W, ggml_type, x, M, K, stream)) {
+        if (gemv_quant_gpu_f32(y, W, W_device_alias, ggml_type, x, M, K,
+                               stream)) {
             return;
         }
     }
@@ -2009,7 +2046,7 @@ static reflex::infer::Status reflex_backend_gemv_quant(
     const reflex::infer::GemvQuantArgs& args) {
     gemv_quant_impl(static_cast<half*>(args.y), args.weights, args.ggml_type,
                     static_cast<const half*>(args.x), args.M, args.K,
-                    cuda_stream(args.stream));
+                    cuda_stream(args.stream), args.weights_device);
     return reflex::infer::Status::Success;
 }
 
@@ -2018,7 +2055,7 @@ static reflex::infer::Status reflex_backend_gemv_quant_add(
     gemv_quant_add_impl(static_cast<half*>(args.y), args.weights, args.ggml_type,
                         static_cast<const half*>(args.x),
                         static_cast<const half*>(args.residual), args.M,
-                        args.K, cuda_stream(args.stream));
+                        args.K, cuda_stream(args.stream), args.weights_device);
     return reflex::infer::Status::Success;
 }
 
@@ -2029,7 +2066,8 @@ static reflex::infer::Status reflex_backend_gemv_quant_pair(
                          static_cast<half*>(args.y1), args.weights1,
                          args.ggml_type1, args.M1,
                          static_cast<const half*>(args.x), args.K,
-                         cuda_stream(args.stream));
+                         cuda_stream(args.stream), args.weights0_device,
+                         args.weights1_device);
     return reflex::infer::Status::Success;
 }
 
@@ -2042,7 +2080,8 @@ static reflex::infer::Status reflex_backend_gemv_quant_triple(
                            static_cast<half*>(args.y2), args.weights2,
                            args.ggml_type2, args.M2,
                            static_cast<const half*>(args.x), args.K,
-                           cuda_stream(args.stream));
+                           cuda_stream(args.stream), args.weights0_device,
+                           args.weights1_device, args.weights2_device);
     return reflex::infer::Status::Success;
 }
 
@@ -2051,7 +2090,7 @@ static reflex::infer::Status reflex_backend_gemm_quant_batched(
     gemm_quant_batched_impl(static_cast<half*>(args.y), args.weights,
                             args.ggml_type, static_cast<const half*>(args.x),
                             args.M, args.N, args.K,
-                            cuda_stream(args.stream));
+                            cuda_stream(args.stream), args.weights_device);
     return reflex::infer::Status::Success;
 }
 
@@ -2059,7 +2098,7 @@ static reflex::infer::Status reflex_backend_gemv_quant_f32(
     const reflex::infer::GemvQuantF32Args& args) {
     gemv_quant_f32_impl(args.y, args.weights, args.ggml_type,
                         static_cast<const half*>(args.x), args.M, args.K,
-                        cuda_stream(args.stream));
+                        cuda_stream(args.stream), args.weights_device);
     return reflex::infer::Status::Success;
 }
 

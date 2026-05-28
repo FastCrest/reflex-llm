@@ -196,6 +196,8 @@ Q4 args carry both the runtime-owned `weights` pointer and the CUDA-visible
 `weights_device` alias. `reflex-llm` fills the alias from its mapped GGUF
 weight resolver, which keeps future `reflex-infer` kernels independent from
 the model loader.
+The current fallback backend consumes that alias directly before falling back
+to the legacy resolver path.
 
 ## Operator Boundary
 
