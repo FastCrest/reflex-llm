@@ -167,7 +167,7 @@ endif()
 
 if(REFLEX_LLM_BUILD_SERVER)
     # cpp-httplib + nlohmann/json — same stack llama.cpp's server uses.
-    # Both header-only and MIT-licensed. Pulled at configure time via
+    # Third-party header-only libraries pulled at configure time via
     # FetchContent so we don't carry ~50 K lines of vendor code in this
     # repo; cached under build/_deps after first configure (subsequent
     # builds are offline). First-time configure needs network access on

@@ -145,4 +145,4 @@ non-aarch64 hosts.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Business Source License 1.1. See [LICENSE](LICENSE).
